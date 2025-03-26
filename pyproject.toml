@@ -1,0 +1,61 @@
+[tool.poetry]
+name = "code_indexer"
+version = "0.1.0"
+description = "A semantic graph-based code search and understanding system"
+authors = ["Your Name <your.email@example.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.8"
+networkx = "^3.0"
+pydantic = "^2.0"
+loguru = "^0.7.0"
+torch = "^2.0.0"
+transformers = "^4.30.0"
+dgl = "^1.1.0"
+numpy = "^1.24.0"
+scikit-learn = "^1.3.0"
+openai = "^1.0.0"
+sentence-transformers = "^2.2.0"
+sqlalchemy = "^2.0.0"
+pymysql = "^1.1.0"
+alembic = "^1.12.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.0"
+black = "^23.0"
+isort = "^5.12"
+mypy = "^1.5"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.plugins."code_indexer.parsers"]
+go = "code_indexer.parsers.go.parser:GoParser"
+python = "code_indexer.parsers.python.parser:PythonParser"
+
+[tool.poetry.plugins."code_indexer.embedders"]
+code = "code_indexer.semantic_graph.embedders.code:CodeEmbedder"
+doc = "code_indexer.semantic_graph.embedders.doc:DocEmbedder"
+
+[tool.poetry.plugins."code_indexer.retrievers"]
+semantic = "code_indexer.retrieval.semantic:SemanticRetriever"
+hybrid = "code_indexer.retrieval.hybrid:HybridRetriever"
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+include = '\.pyi?$'
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+line_length = 88
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+check_untyped_defs = true 
