@@ -1,4 +1,3 @@
-"""
 # Code Indexer
 
 A semantic graph-based code search and understanding system that implements the Search-Expand-Refine paradigm for repository-level codebase analysis.
@@ -96,6 +95,55 @@ expanded = results.expand()
 explanation = results.explain()
 ```
 
+## Running Tests
+
+The project uses pytest for unit and integration tests. To run the tests, follow these steps:
+
+### Prerequisites
+
+- Ensure you have all dependencies installed
+- For Go parser tests, you need to have Go installed on your system
+
+### Running All Tests
+
+```bash
+# Using Poetry
+poetry run pytest
+
+# Using Python directly
+python -m pytest
+```
+
+### Running Specific Test Files
+
+```bash
+# Run tests for a specific module
+python -m pytest tests/test_semantic_graph_builder.py
+
+# Run tests for Go parser
+python -m pytest tests/test_go_parser.py
+```
+
+### Running Tests with Verbose Output
+
+```bash
+# For more detailed test output
+python -m pytest -v
+
+# With full traceback
+python -m pytest --tb=native
+```
+
+### Test Coverage
+
+```bash
+# Run tests with coverage report
+python -m pytest --cov=code_indexer
+
+# Generate HTML coverage report
+python -m pytest --cov=code_indexer --cov-report=html
+```
+
 ## Supported Languages
 
 Currently supported languages:
@@ -111,4 +159,3 @@ Contributions are welcome! Please read our contributing guidelines before submit
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
-""" 

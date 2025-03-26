@@ -1,4 +1,3 @@
-"""
 import numpy as np
 from typing import List, Dict, Any
 import networkx as nx
@@ -105,4 +104,3 @@ class SemanticRetriever:
     def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
         """Compute cosine similarity between vectors"""
         return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
-""" 

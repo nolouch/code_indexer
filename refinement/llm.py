@@ -1,4 +1,3 @@
-"""
 from typing import List, Dict, Any
 import openai
 from ..retrieval.semantic import SemanticRetriever
@@ -129,4 +128,3 @@ Synthesize a comprehensive answer that:
                 item += f"Search Score: {result['score']}\n"
             context.append(item)
         return "\n".join(context)
-""" 

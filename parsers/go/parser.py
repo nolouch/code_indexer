@@ -3,8 +3,8 @@ import logging
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Any
-from ...core.parser import LanguageParser, ParserPlugin
-from ...core.models import (
+from core.parser import LanguageParser, ParserPlugin
+from core.models import (
     CodeRepository, Module, Function, Class,
     Interface, CodeElement
 )
@@ -18,6 +18,7 @@ class GoParser(LanguageParser):
     def __init__(self):
         super().__init__()
         self.ast_tool_path: Optional[Path] = None
+        self.repository = None
         
     def setup(self):
         """Setup the Go AST analyzer tool"""
@@ -27,7 +28,7 @@ class GoParser(LanguageParser):
         try:
             subprocess.run(
                 ["go", "build", "-o", str(self.ast_tool_path)],
-                cwd=tools_dir.parent,  # Use go directory for build context
+                cwd=tools_dir,  # Use analyzer directory for build context
                 check=True,
                 capture_output=True
             )
@@ -63,7 +64,21 @@ class GoParser(LanguageParser):
         """Parse a single Go file"""
         # For Go, we always parse at package level
         pkg_dir = Path(file_path).parent
-        return self._parse_package(str(pkg_dir))
+        
+        # Create a repository if it doesn't exist
+        if not self.repository:
+            self.repository = CodeRepository(
+                root_path=str(pkg_dir.parent),
+                language="go"
+            )
+            
+        module = self._parse_package(str(pkg_dir))
+        
+        # Add module to repository for dependency analysis
+        if module and module.name:
+            self.repository.modules[module.name] = module
+            
+        return module
         
     def _get_packages(self, directory: str) -> List[str]:
         """Get all Go packages in the directory"""
@@ -98,67 +113,74 @@ class GoParser(LanguageParser):
             ast_data = json.loads(result.stdout)
             
             # Convert AST data to our model
-            for pkg_path, pkg_info in ast_data.items():
-                module = Module(
-                    name=pkg_info["name"],
-                    element_type="package",
-                    language="go",
-                    file=pkg_info["files"][0] if pkg_info["files"] else "",
-                    line=1,  # Package declaration is usually at line 1
-                    imports=pkg_info["imports"],
-                    files=pkg_info["files"]
-                )
+            # Take the first package if multiple exist
+            if not ast_data:
+                logger.warning(f"No packages found in {package_path}")
+                return None
                 
-                # Add functions
-                for func_info in pkg_info["functions"]:
-                    func = Function(
-                        name=func_info["name"],
-                        element_type="function",
-                        language="go",
-                        file=func_info["file"],
-                        line=func_info["line"],
-                        docstring=func_info.get("docstring", ""),
-                        calls=func_info.get("calls", []),
-                        parent_class=func_info.get("receiver_type")
-                    )
-                    module.functions.append(func)
-                    
-                # Add structs
-                for struct_info in pkg_info["structs"]:
-                    struct = Class(
-                        name=struct_info["name"],
-                        element_type="struct",
-                        language="go",
-                        file=struct_info["file"],
-                        line=struct_info["line"],
-                        docstring=struct_info.get("docstring", ""),
-                        fields=struct_info["fields"]
-                    )
-                    module.classes.append(struct)
-                    
-                # Add interfaces
-                for iface_info in pkg_info["interfaces"]:
-                    iface = Interface(
-                        name=iface_info["name"],
-                        element_type="interface",
-                        language="go",
-                        file=iface_info["file"],
-                        line=iface_info["line"],
-                        docstring=iface_info.get("docstring", ""),
-                        methods=[
-                            Function(
-                                name=m,
-                                element_type="function",
-                                language="go",
-                                file=iface_info["file"],
-                                line=iface_info["line"]
-                            )
-                            for m in iface_info["methods"]
-                        ]
-                    )
-                    module.interfaces.append(iface)
-                    
-                return module
+            pkg_path = next(iter(ast_data))  # Get first package key
+            pkg_info = ast_data[pkg_path]
+            
+            module = Module(
+                name=pkg_info["name"],
+                element_type="package",
+                language="go",
+                file=pkg_info["files"][0] if pkg_info["files"] else "",
+                line=1,  # Package declaration is usually at line 1
+                imports=pkg_info["imports"],
+                files=pkg_info["files"]
+            )
+            
+            # Add functions
+            for func_info in pkg_info.get("functions", []):
+                func = Function(
+                    name=func_info["name"],
+                    element_type="function",
+                    language="go",
+                    file=func_info["file"],
+                    line=func_info["line"],
+                    docstring=func_info.get("docstring", ""),
+                    calls=func_info.get("calls", []),
+                    parent_class=func_info.get("receiver_type")
+                )
+                module.functions.append(func)
+                
+            # Add structs
+            for struct_info in pkg_info.get("structs", []):
+                struct = Class(
+                    name=struct_info["name"],
+                    element_type="struct",
+                    language="go",
+                    file=struct_info["file"],
+                    line=struct_info["line"],
+                    docstring=struct_info.get("docstring", ""),
+                    fields=struct_info.get("fields", [])
+                )
+                module.classes.append(struct)
+                
+            # Add interfaces
+            for iface_info in pkg_info.get("interfaces", []):
+                iface = Interface(
+                    name=iface_info["name"],
+                    element_type="interface",
+                    language="go",
+                    file=iface_info["file"],
+                    line=iface_info["line"],
+                    docstring=iface_info.get("docstring", ""),
+                    methods=[
+                        Function(
+                            name=m,
+                            element_type="function",
+                            language="go",
+                            file=iface_info["file"],
+                            line=iface_info["line"]
+                        )
+                        for m in iface_info.get("methods", [])
+                    ]
+                )
+                module.interfaces.append(iface)
+                
+            return module
                 
         except subprocess.CalledProcessError as e:
             logger.error(f"Error running AST analyzer: {e.stderr}")
@@ -177,6 +199,7 @@ class GoParser(LanguageParser):
         }
         
         if isinstance(element, Module):
+            # Add import dependencies
             deps["imports"] = [
                 CodeElement(
                     name=imp,
@@ -189,6 +212,7 @@ class GoParser(LanguageParser):
             ]
             
         elif isinstance(element, Function):
+            # Add call dependencies
             deps["calls"] = [
                 CodeElement(
                     name=call,
@@ -202,10 +226,24 @@ class GoParser(LanguageParser):
             
         elif isinstance(element, Class):
             # Find interface implementations
-            for module in self.repository.modules.values():
-                for interface in module.interfaces:
-                    if self._struct_implements_interface(element, interface):
-                        deps["implements"].append(interface)
+            if hasattr(element, "implements") and element.implements:
+                # Direct implementation list
+                deps["implements"] = [
+                    CodeElement(
+                        name=impl,
+                        element_type="interface",
+                        language="go",
+                        file="",
+                        line=0
+                    )
+                    for impl in element.implements
+                ]
+            elif self.repository:
+                # Infer implementations from method signatures
+                for module in self.repository.modules.values():
+                    for interface in module.interfaces:
+                        if self._struct_implements_interface(element, interface):
+                            deps["implements"].append(interface)
                         
         return deps
         
@@ -249,17 +287,18 @@ class GoParser(LanguageParser):
         return call_graph
         
     def get_inheritance_graph(self, module: Module) -> Dict[str, List[str]]:
-        """Get the interface implementation graph for a module"""
+        """Get the inheritance graph for a module"""
         inheritance_graph = {}
         
-        # Add interface implementations
-        for interface in module.interfaces:
-            implementations = []
-            for cls in module.classes:
-                if self._struct_implements_interface(cls, interface):
-                    implementations.append(cls.name)
-            inheritance_graph[interface.name] = implementations
+        # Add interface inheritance
+        for iface in module.interfaces:
+            inheritance_graph[iface.name] = iface.extends
             
+        # Add struct embedding
+        for struct in module.classes:
+            if hasattr(struct, "parent_classes"):
+                inheritance_graph[struct.name] = struct.parent_classes
+                
         return inheritance_graph
         
     def get_symbol_table(self, module: Module) -> Dict[str, CodeElement]:
@@ -270,20 +309,27 @@ class GoParser(LanguageParser):
         for func in module.functions:
             symbols[func.name] = func
             
-        # Add structs and their methods
+        # Add structs
         for struct in module.classes:
             symbols[struct.name] = struct
+            
+            # Add struct methods
             for method in struct.methods:
                 symbols[f"{struct.name}.{method.name}"] = method
                 
         # Add interfaces
-        for interface in module.interfaces:
-            symbols[interface.name] = interface
+        for iface in module.interfaces:
+            symbols[iface.name] = iface
             
         return symbols
         
     def _struct_implements_interface(self, struct: Class, interface: Interface) -> bool:
         """Check if a struct implements an interface"""
-        struct_methods = {m.name for m in struct.methods}
-        interface_methods = {m.name for m in interface.methods}
+        if not hasattr(struct, "methods") or not struct.methods:
+            return False
+            
+        struct_methods = {method.name for method in struct.methods}
+        interface_methods = {method.name for method in interface.methods}
+        
+        # All interface methods must be implemented by the struct
         return interface_methods.issubset(struct_methods) 

@@ -12,7 +12,7 @@ node_relationships = Table(
     Column('target_id', Integer, ForeignKey('nodes.id'), primary_key=True),
     Column('relationship_type', String(50)),
     Column('weight', Float),
-    Column('metadata', JSON),
+    Column('attributes', JSON),
 )
 
 class Node(Base):
@@ -29,7 +29,7 @@ class Node(Base):
     code_content = Column(Text)  # Actual code content
     code_embedding = Column(JSON)  # Code embedding vector
     doc_embedding = Column(JSON)  # Documentation embedding vector
-    metadata = Column(JSON)  # Additional metadata
+    extra_data = Column(JSON)  # Additional metadata
 
     # Define relationships
     outgoing_edges = relationship(
@@ -49,7 +49,7 @@ class Repository(Base):
     path = Column(String(255), unique=True)
     language = Column(String(50))
     last_indexed = Column(String(50))  # Timestamp of last indexing
-    metadata = Column(JSON)  # Additional repository metadata
+    repo_data = Column(JSON)  # Additional repository metadata
 
 class GraphMetadata(Base):
     """Stores metadata about the semantic graph"""
@@ -61,4 +61,4 @@ class GraphMetadata(Base):
     edge_count = Column(Integer)
     last_updated = Column(String(50))  # Timestamp of last update
     embedder_config = Column(JSON)  # Configuration of embedders
-    metadata = Column(JSON)  # Additional graph metadata
+    graph_data = Column(JSON)  # Additional graph metadata
