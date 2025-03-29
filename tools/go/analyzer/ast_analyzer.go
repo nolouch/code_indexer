@@ -20,6 +20,7 @@ type FunctionInfo struct {
 	Line         int      `json:"line"`
 	DocString    string   `json:"docstring,omitempty"`
 	Calls        []string `json:"calls"`
+	Context      string   `json:"context"`
 }
 
 type StructInfo struct {
@@ -30,6 +31,7 @@ type StructInfo struct {
 	DocString string      `json:"docstring,omitempty"`
 	Fields    []FieldInfo `json:"fields"`
 	Methods   []string    `json:"methods"`
+	Context   string      `json:"context"`
 }
 
 type FieldInfo struct {
@@ -45,6 +47,7 @@ type InterfaceInfo struct {
 	Line      int      `json:"line"`
 	DocString string   `json:"docstring,omitempty"`
 	Methods   []string `json:"methods"`
+	Context   string   `json:"context"`
 }
 
 type PackageInfo struct {
@@ -59,6 +62,7 @@ type PackageInfo struct {
 
 func main() {
 	pkgPath := flag.String("pkg", ".", "package path to analyze")
+	dirPath := flag.String("dir", "", "directory path to analyze")
 	outputFile := flag.String("output", "", "output JSON file")
 	flag.Parse()
 
@@ -68,7 +72,34 @@ func main() {
 		Tests: false,
 	}
 
-	pkgs, err := packages.Load(cfg, *pkgPath)
+	var pkgs []*packages.Package
+	var err error
+
+	// 如果提供了目录路径，则使用目录路径进行分析
+	if *dirPath != "" {
+		// 将工作目录设置为指定目录
+		oldDir, err := os.Getwd()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error getting current directory: %v\n", err)
+			os.Exit(1)
+		}
+
+		err = os.Chdir(*dirPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error changing to directory %s: %v\n", *dirPath, err)
+			os.Exit(1)
+		}
+
+		// 分析目录中的所有Go文件
+		pkgs, err = packages.Load(cfg, "./...")
+
+		// 恢复原工作目录
+		_ = os.Chdir(oldDir)
+	} else {
+		// 使用包路径进行分析
+		pkgs, err = packages.Load(cfg, *pkgPath)
+	}
+
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading package: %v\n", err)
 		os.Exit(1)
@@ -142,6 +173,27 @@ func main() {
 	}
 }
 
+func getNodeContent(node ast.Node, pkg *packages.Package) string {
+	fset := pkg.Fset
+	start := fset.Position(node.Pos())
+	end := fset.Position(node.End())
+
+	// Read the source file
+	content, err := os.ReadFile(start.Filename)
+	if err != nil {
+		return ""
+	}
+
+	// Convert byte positions to array indices
+	startOffset := start.Offset
+	endOffset := end.Offset
+
+	if startOffset >= 0 && endOffset >= 0 && endOffset <= len(content) {
+		return string(content[startOffset:endOffset])
+	}
+	return ""
+}
+
 func analyzeFuncDecl(node *ast.FuncDecl, pkg *packages.Package, file *ast.File) FunctionInfo {
 	fset := pkg.Fset
 	pos := fset.Position(node.Pos())
@@ -151,6 +203,7 @@ func analyzeFuncDecl(node *ast.FuncDecl, pkg *packages.Package, file *ast.File) 
 		Package: pkg.PkgPath,
 		File:    pos.Filename,
 		Line:    pos.Line,
+		Context: getNodeContent(node, pkg),
 	}
 
 	// Get receiver type if method
@@ -194,6 +247,7 @@ func analyzeStructType(node *ast.TypeSpec, structType *ast.StructType, pkg *pack
 		Package: pkg.PkgPath,
 		File:    pos.Filename,
 		Line:    pos.Line,
+		Context: fmt.Sprintf("type %s %s", node.Name.Name, getNodeContent(structType, pkg)),
 	}
 
 	if node.Doc != nil {
@@ -229,6 +283,7 @@ func analyzeInterfaceType(node *ast.TypeSpec, interfaceType *ast.InterfaceType, 
 		Package: pkg.PkgPath,
 		File:    pos.Filename,
 		Line:    pos.Line,
+		Context: fmt.Sprintf("type %s %s", node.Name.Name, getNodeContent(interfaceType, pkg)),
 	}
 
 	if node.Doc != nil {

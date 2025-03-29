@@ -4,7 +4,8 @@ from typing import Dict, List, Optional, Any
 
 class CodeElement(ABC):
     """Base class for all code elements"""
-    def __init__(self, name: str, element_type: str, language: str, file: str, line: int, docstring: str = "", attributes: Dict[str, Any] = None):
+    def __init__(self, name: str, element_type: str, language: str, file: str, line: int, 
+                 docstring: str = "", attributes: Dict[str, Any] = None, context: str = ""):
         self.name = name
         self.element_type = element_type
         self.language = language
@@ -12,6 +13,7 @@ class CodeElement(ABC):
         self.line = line
         self.docstring = docstring
         self.attributes = attributes or {}
+        self.context = context  # Source code context of the element
 
 class Function(CodeElement):
     """Represents a function or method"""
@@ -20,8 +22,9 @@ class Function(CodeElement):
                  parameters: List[Dict[str, str]] = None, 
                  return_types: List[str] = None,
                  calls: List[str] = None, 
-                 parent_class: Optional[str] = None):
-        super().__init__(name, element_type, language, file, line, docstring, attributes)
+                 parent_class: Optional[str] = None,
+                 context: str = ""):
+        super().__init__(name, element_type, language, file, line, docstring, attributes, context)
         self.parameters = parameters or []
         self.return_types = return_types or []
         self.calls = calls or []
@@ -34,8 +37,9 @@ class Class(CodeElement):
                  fields: List[Dict[str, str]] = None, 
                  methods: List[Function] = None,
                  parent_classes: List[str] = None, 
-                 implements: List[str] = None):
-        super().__init__(name, element_type, language, file, line, docstring, attributes)
+                 implements: List[str] = None,
+                 context: str = ""):
+        super().__init__(name, element_type, language, file, line, docstring, attributes, context)
         self.fields = fields or []
         self.methods = methods or []
         self.parent_classes = parent_classes or []
@@ -46,8 +50,9 @@ class Interface(CodeElement):
     def __init__(self, name: str, element_type: str, language: str, file: str, line: int, 
                  docstring: str = "", attributes: Dict[str, Any] = None,
                  methods: List[Function] = None, 
-                 extends: List[str] = None):
-        super().__init__(name, element_type, language, file, line, docstring, attributes)
+                 extends: List[str] = None,
+                 context: str = ""):
+        super().__init__(name, element_type, language, file, line, docstring, attributes, context)
         self.methods = methods or []
         self.extends = extends or []
 
@@ -60,8 +65,9 @@ class Module(CodeElement):
                  classes: List[Class] = None, 
                  interfaces: List[Interface] = None,
                  submodules: List[str] = None, 
-                 files: List[str] = None):
-        super().__init__(name, element_type, language, file, line, docstring, attributes)
+                 files: List[str] = None,
+                 context: str = ""):
+        super().__init__(name, element_type, language, file, line, docstring, attributes, context)
         self.imports = imports or []
         self.functions = functions or []
         self.classes = classes or []
@@ -71,8 +77,11 @@ class Module(CodeElement):
 
 class Variable(CodeElement):
     """Represents a variable or constant"""
-    def __init__(self, name: str, element_type: str, language: str, file: str, line: int, var_type: str, docstring: str = "", attributes: Dict[str, Any] = None, is_constant: bool = False, value: Optional[str] = None):
-        super().__init__(name, element_type, language, file, line, docstring, attributes)
+    def __init__(self, name: str, element_type: str, language: str, file: str, line: int, 
+                 var_type: str, docstring: str = "", attributes: Dict[str, Any] = None, 
+                 is_constant: bool = False, value: Optional[str] = None,
+                 context: str = ""):
+        super().__init__(name, element_type, language, file, line, docstring, attributes, context)
         self.var_type = var_type
         self.is_constant = is_constant
         self.value = value

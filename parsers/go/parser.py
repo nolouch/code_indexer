@@ -1,6 +1,7 @@
 import json
 import logging
 import subprocess
+import os
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from core.parser import LanguageParser, ParserPlugin
@@ -25,15 +26,34 @@ class GoParser(LanguageParser):
         tools_dir = Path(__file__).parent.parent.parent / "tools" / "go" / "analyzer"
         self.ast_tool_path = tools_dir / "ast_analyzer"
         
+        # Check if ast_analyzer already exists
+        if self.ast_tool_path.exists():
+            logger.info(f"Found existing AST analyzer at {self.ast_tool_path}")
+            self.initialized = True
+            return
+            
+        logger.info(f"Building AST analyzer in {tools_dir}")
+        
         try:
-            subprocess.run(
-                ["go", "build", "-o", str(self.ast_tool_path)],
+            # Ensure working directory is analyzer directory
+            result = subprocess.run(
+                ["go", "build", "-o", str(self.ast_tool_path), "ast_analyzer.go"],
                 cwd=tools_dir,  # Use analyzer directory for build context
                 check=True,
                 capture_output=True
             )
+            
+            if self.ast_tool_path.exists():
+                logger.info(f"Successfully built AST analyzer at {self.ast_tool_path}")
+                self.initialized = True
+            else:
+                logger.error(f"AST analyzer was not built at {self.ast_tool_path}")
+                self.initialized = False
+                
         except subprocess.CalledProcessError as e:
-            logger.error(f"Error building AST analyzer: {e.stderr.decode()}")
+            logger.error(f"Error building AST analyzer: {e.stderr.decode() if hasattr(e.stderr, 'decode') else e.stderr}")
+            logger.error(f"Command output: {e.stdout.decode() if hasattr(e.stdout, 'decode') else e.stdout}")
+            self.initialized = False
             raise
             
     def parse_directory(self, directory: str) -> CodeRepository:
@@ -62,16 +82,25 @@ class GoParser(LanguageParser):
         
     def parse_file(self, file_path: str) -> Module:
         """Parse a single Go file"""
+        if not os.path.exists(file_path):
+            logger.error(f"File {file_path} does not exist")
+            return None
+        
         # For Go, we always parse at package level
         pkg_dir = Path(file_path).parent
         
+        # Find the go.mod directory to properly resolve the module
+        go_mod_dir = self._find_go_mod_dir(pkg_dir)
+        
         # Create a repository if it doesn't exist
         if not self.repository:
+            root_path = str(go_mod_dir) if go_mod_dir else str(pkg_dir.parent)
             self.repository = CodeRepository(
-                root_path=str(pkg_dir.parent),
+                root_path=root_path,
                 language="go"
             )
             
+        # Use the directory containing the file for parsing
         module = self._parse_package(str(pkg_dir))
         
         # Add module to repository for dependency analysis
@@ -80,114 +109,413 @@ class GoParser(LanguageParser):
             
         return module
         
+    def _find_go_mod_dir(self, directory: Path) -> Optional[Path]:
+        """Find the directory containing go.mod by walking up the directory tree"""
+        current_dir = directory
+        # Check up to 10 parent directories
+        for _ in range(10):
+            go_mod_path = current_dir / "go.mod"
+            if go_mod_path.exists():
+                return current_dir
+            
+            # Move up one directory
+            parent_dir = current_dir.parent
+            if parent_dir == current_dir:  # Reached root
+                break
+            current_dir = parent_dir
+            
+        return None
+        
     def _get_packages(self, directory: str) -> List[str]:
-        """Get all Go packages in the directory"""
-        try:
-            result = subprocess.run(
-                ['go', 'list', './...'],
-                cwd=directory,
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            return [pkg for pkg in result.stdout.strip().split('\n') if pkg]
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Error listing Go packages: {e}")
+        """Get a list of Go packages"""
+        # First check if the directory exists
+        if not os.path.exists(directory):
+            logger.error(f"Directory does not exist: {directory}")
             return []
+            
+        # Check if it's a valid Go module directory
+        if os.path.exists(os.path.join(directory, "go.mod")):
+            logger.info(f"Found go.mod in {directory}, trying to use 'go list'")
+            try:
+                # Try to use the go list command to get package list
+                env = os.environ.copy()
+                env["GO111MODULE"] = "on"
+                cmd = ["go", "list", "-f", "{{.ImportPath}}:{{.Dir}}", "./..."]
+                result = subprocess.run(
+                    cmd,
+                    cwd=directory,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    env=env
+                )
+                
+                if result.returncode == 0 and result.stdout.strip():
+                    package_paths = {}
+                    lines = result.stdout.strip().split('\n')
+                    for line in lines:
+                        if ':' in line:
+                            import_path, dir_path = line.split(':', 1)
+                            # Store both import path and directory path
+                            package_paths[import_path] = dir_path
+                            
+                    logger.info(f"Found {len(package_paths)} Go packages using 'go list'")
+                    
+                    # We'll use the directory paths for analysis since our AST tool works better with paths
+                    return list(package_paths.values())
+                else:
+                    logger.warning(f"'go list' failed or returned empty result: {result.stderr}")
+                    logger.info("Falling back to filesystem scan")
+            except Exception as e:
+                logger.warning(f"Error running 'go list': {e}")
+                logger.info("Falling back to filesystem scan")
+        else:
+            logger.info(f"No go.mod found in {directory}, using filesystem scan")
+            
+        # If go list fails or go.mod is not found, use filesystem scanning
+        return self._get_packages_by_filesystem(directory)
+            
+    def _get_packages_by_filesystem(self, repo_path: str) -> List[str]:
+        """Scan filesystem for Go files and return a list of packages"""
+        # Ensure path is absolute
+        repo_path = os.path.abspath(repo_path)
+        logger.info(f"Scanning for Go files in {repo_path}")
+        
+        packages = set()
+        go_files = []
+        
+        # Walk through directories looking for Go files
+        for root, _, files in os.walk(repo_path):
+            # Exclude vendor and hidden directories
+            if 'vendor' in root.split(os.path.sep) or any(p.startswith('.') for p in root.split(os.path.sep)):
+                continue
+                
+            # Check if there are Go files
+            has_go_files = False
+            dir_go_files = []
+            for file in files:
+                if file.endswith('.go') and not file.endswith('_test.go'):
+                    has_go_files = True
+                    dir_go_files.append(os.path.join(root, file))
+                    
+            if has_go_files:
+                # Add this directory as a package
+                rel_path = os.path.relpath(root, repo_path)
+                if rel_path == '.':
+                    packages.add(repo_path)
+                else:
+                    packages.add(os.path.join(repo_path, rel_path))
+                go_files.extend(dir_go_files)
+                
+        logger.info(f"Found {len(packages)} Go packages by filesystem scan")
+        logger.debug(f"Found {len(go_files)} Go files")
+        
+        return list(packages)
             
     def _parse_package(self, package_path: str) -> Module:
         """Parse a Go package using the AST analyzer"""
+        if not package_path:
+            logger.error("Empty package path provided")
+            return None
+            
         if not self.ast_tool_path:
             self.setup()
             
+        if not self.initialized:
+            logger.error("AST analyzer not initialized. Cannot parse package.")
+            return None
+            
+        # Check if package_path is a local filesystem path
+        is_filesystem_path = os.path.exists(package_path)
+        abs_path = os.path.abspath(package_path) if is_filesystem_path else ""
+        
+        logger.info(f"Parsing {'directory' if is_filesystem_path else 'package'}: {package_path}")
+        
         try:
-            # Run AST analyzer
+            # Prepare command line arguments
+            cmd = [str(self.ast_tool_path)]
+            
+            if is_filesystem_path:
+                # For filesystem paths, use the -dir parameter
+                cmd.extend(["-dir", abs_path])
+                logger.debug(f"Using directory mode with path: {abs_path}")
+            else:
+                # For Go package paths, we need to use directory mode with GOMOD to resolve properly
+                # Try to get the directory containing the go.mod file
+                if self.repository and hasattr(self.repository, "root_path"):
+                    root_path = self.repository.root_path
+                    # Need to use directory mode with proper Go environment
+                    cmd.extend(["-dir", root_path])
+                    logger.debug(f"Using directory mode with root path for package: {package_path}")
+                else:
+                    # Use the pkg parameter as a fallback, though it may not work correctly
+                    cmd.extend(["-pkg", package_path])
+                    logger.debug(f"Using package mode with path: {package_path}")
+                
+            # Run the AST analyzer with proper Go environment
+            env = os.environ.copy()
+            # Set GO111MODULE to "on" to ensure module-aware mode
+            env["GO111MODULE"] = "on"
+            
+            logger.debug(f"Running command: {' '.join(cmd)}")
             result = subprocess.run(
-                [str(self.ast_tool_path), "-pkg", package_path],
+                cmd,
                 capture_output=True,
                 text=True,
-                check=True
+                check=False,  # Don't raise exceptions, we'll handle errors manually
+                env=env
             )
             
+            # Check if the command was successful
+            if result.returncode != 0:
+                logger.warning(f"AST analyzer failed with code {result.returncode}: {result.stderr}")
+                logger.debug(f"Command: {' '.join(cmd)}")
+                return None
+                
+            # If output is empty, package may not have been found
+            if not result.stdout or not result.stdout.strip():
+                logger.warning(f"No output from AST analyzer for {package_path}")
+                return None
+                
             # Parse JSON output
-            ast_data = json.loads(result.stdout)
-            
-            # Convert AST data to our model
-            # Take the first package if multiple exist
+            try:
+                logger.debug("Parsing AST analyzer JSON output")
+                ast_data = json.loads(result.stdout)
+                logger.debug(f"JSON data type: {type(ast_data)}")
+                
+                # Safety check: if AST data is None or empty, return early
+                if not ast_data:
+                    logger.warning(f"AST data is empty for {package_path}")
+                    return None
+                    
+            except json.JSONDecodeError as e:
+                logger.error(f"Invalid JSON from AST analyzer: {e}")
+                logger.debug(f"JSON snippet: {result.stdout[:200]}...")
+                return None
+                
+            # Check if there is package data
             if not ast_data:
                 logger.warning(f"No packages found in {package_path}")
                 return None
                 
-            pkg_path = next(iter(ast_data))  # Get first package key
-            pkg_info = ast_data[pkg_path]
-            
-            module = Module(
-                name=pkg_info["name"],
-                element_type="package",
-                language="go",
-                file=pkg_info["files"][0] if pkg_info["files"] else "",
-                line=1,  # Package declaration is usually at line 1
-                imports=pkg_info["imports"],
-                files=pkg_info["files"]
-            )
-            
-            # Add functions
-            for func_info in pkg_info.get("functions", []):
-                func = Function(
-                    name=func_info["name"],
-                    element_type="function",
+            # Get the first package information
+            try:
+                logger.debug(f"AST data keys: {list(ast_data.keys()) if isinstance(ast_data, dict) else 'Not a dict'}")
+                
+                # Ensure ast_data is a dictionary
+                if not isinstance(ast_data, dict) or not ast_data:
+                    logger.warning(f"AST data for {package_path} is not a valid dictionary or is empty")
+                    return None
+                
+                # For a package path, we need to look for the specific package
+                if not is_filesystem_path and "." in package_path:
+                    # See if we can find the package by name
+                    pkg_path = None
+                    for key in ast_data.keys():
+                        if key.endswith(package_path) or package_path.endswith(key):
+                            pkg_path = key
+                            break
+                    
+                    if not pkg_path:
+                        logger.warning(f"Package {package_path} not found in AST data")
+                        # Still try with first package as fallback
+                        if ast_data:
+                            pkg_path = next(iter(ast_data))
+                        else:
+                            logger.warning("AST data is empty, cannot extract package information")
+                            return None
+                else:
+                    # Get the first package key
+                    if ast_data:
+                        pkg_path = next(iter(ast_data))
+                    else:
+                        logger.warning("AST data is empty, cannot extract package information")
+                        return None
+                
+                # Ensure pkg_info is a dictionary
+                pkg_info = ast_data.get(pkg_path)
+                if not isinstance(pkg_info, dict) or not pkg_info:
+                    logger.warning(f"Package info for {pkg_path} is not a valid dictionary or is empty")
+                    return None
+                
+                logger.debug(f"Package info type: {type(pkg_info)}")
+                logger.info(f"Found package {pkg_info.get('name', 'unknown')} at {pkg_path}")
+                
+                # Check if the package has files
+                if not pkg_info.get("files"):
+                    logger.warning(f"Package {pkg_path} has no files")
+                    return None
+                
+                # Ensure "files" is a list
+                files_list = pkg_info.get("files", [])
+                if not isinstance(files_list, list):
+                    logger.warning(f"Files for package {pkg_path} is not a list")
+                    files_list = []
+                    
+                # Normalize file paths
+                files = []
+                for file_path in files_list:
+                    if not file_path:  # Skip empty file paths
+                        continue
+                        
+                    # Ensure file path is absolute
+                    if os.path.isabs(file_path):
+                        files.append(file_path)
+                    elif is_filesystem_path:
+                        # If it's a relative path, convert to absolute
+                        files.append(os.path.join(abs_path, file_path))
+                    else:
+                        files.append(file_path)
+                
+                if not files:
+                    logger.warning(f"No valid files found for package {pkg_path}")
+                    return None
+                        
+                # Create module object
+                module = Module(
+                    name=pkg_info.get("name", os.path.basename(package_path)),
+                    element_type="package",
                     language="go",
-                    file=func_info["file"],
-                    line=func_info["line"],
-                    docstring=func_info.get("docstring", ""),
-                    calls=func_info.get("calls", []),
-                    parent_class=func_info.get("receiver_type")
+                    file=files[0] if files else "",
+                    line=1,  # Package declaration is usually at line 1
+                    imports=pkg_info.get("imports", []),
+                    files=files
                 )
-                module.functions.append(func)
                 
-            # Add structs
-            for struct_info in pkg_info.get("structs", []):
-                struct = Class(
-                    name=struct_info["name"],
-                    element_type="struct",
-                    language="go",
-                    file=struct_info["file"],
-                    line=struct_info["line"],
-                    docstring=struct_info.get("docstring", ""),
-                    fields=struct_info.get("fields", [])
-                )
-                module.classes.append(struct)
+                # Ensure functions, structs, and interfaces are lists before processing
+                funcs_list = pkg_info.get("functions", [])
+                if not isinstance(funcs_list, list):
+                    logger.warning(f"Functions for package {pkg_path} is not a list")
+                    funcs_list = []
                 
-            # Add interfaces
-            for iface_info in pkg_info.get("interfaces", []):
-                iface = Interface(
-                    name=iface_info["name"],
-                    element_type="interface",
-                    language="go",
-                    file=iface_info["file"],
-                    line=iface_info["line"],
-                    docstring=iface_info.get("docstring", ""),
-                    methods=[
-                        Function(
-                            name=m,
-                            element_type="function",
-                            language="go",
-                            file=iface_info["file"],
-                            line=iface_info["line"]
-                        )
-                        for m in iface_info.get("methods", [])
-                    ]
-                )
-                module.interfaces.append(iface)
+                # Add functions
+                for func_info in funcs_list:
+                    # Skip if function info is None or not a dictionary
+                    if not func_info or not isinstance(func_info, dict):
+                        continue
+                        
+                    # Normalize file path
+                    func_file = func_info.get("file", "")
+                    if func_file and not os.path.isabs(func_file) and is_filesystem_path:
+                        func_file = os.path.join(abs_path, func_file)
+                        
+                    func = Function(
+                        name=func_info.get("name", "unknown"),
+                        element_type="function",
+                        language="go",
+                        file=func_file,
+                        line=func_info.get("line", 1),
+                        docstring=func_info.get("docstring", ""),
+                        calls=func_info.get("calls", []),
+                        parent_class=func_info.get("receiver_type", ""),
+                        context=func_info.get("context", "")
+                    )
+                    module.functions.append(func)
                 
-            return module
+                structs_list = pkg_info.get("structs", [])
+                if not isinstance(structs_list, list):
+                    logger.warning(f"Structs for package {pkg_path} is not a list")
+                    structs_list = []
+                    
+                # Add structs
+                for struct_info in structs_list:
+                    # Skip if struct info is None or not a dictionary
+                    if not struct_info or not isinstance(struct_info, dict):
+                        continue
+                        
+                    # Normalize file path
+                    struct_file = struct_info.get("file", "")
+                    if struct_file and not os.path.isabs(struct_file) and is_filesystem_path:
+                        struct_file = os.path.join(abs_path, struct_file)
+                        
+                    # Ensure fields is a list
+                    fields = struct_info.get("fields", [])
+                    if not isinstance(fields, list):
+                        fields = []
+                        
+                    # Ensure methods is a list
+                    methods = struct_info.get("methods", [])
+                    if not isinstance(methods, list):
+                        methods = []
+                        
+                    struct = Class(
+                        name=struct_info.get("name", "unknown"),
+                        element_type="struct",
+                        language="go",
+                        file=struct_file,
+                        line=struct_info.get("line", 1),
+                        docstring=struct_info.get("docstring", ""),
+                        fields=[{
+                            "name": f["name"],
+                            "type": f["type"],
+                            "tag": f.get("tag", "")
+                        } for f in fields],
+                        methods=methods,
+                        context=struct_info.get("context", "")
+                    )
+                    module.classes.append(struct)
                 
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Error running AST analyzer: {e.stderr}")
-            raise
-        except json.JSONDecodeError as e:
-            logger.error(f"Error parsing AST analyzer output: {e}")
-            raise
+                ifaces_list = pkg_info.get("interfaces", [])
+                if not isinstance(ifaces_list, list):
+                    logger.warning(f"Interfaces for package {pkg_path} is not a list")
+                    ifaces_list = []
+                    
+                # Add interfaces
+                for iface_info in ifaces_list:
+                    # Skip if interface info is None or not a dictionary
+                    if not iface_info or not isinstance(iface_info, dict):
+                        continue
+                        
+                    # Normalize file path
+                    iface_file = iface_info.get("file", "")
+                    if iface_file and not os.path.isabs(iface_file) and is_filesystem_path:
+                        iface_file = os.path.join(abs_path, iface_file)
+                        
+                    # Ensure methods is a list
+                    methods_list = iface_info.get("methods", [])
+                    if not isinstance(methods_list, list):
+                        methods_list = []
+                        
+                    # Create method objects
+                    methods = []
+                    for method_name in methods_list:
+                        if method_name and isinstance(method_name, str):  # Check if method name is a valid string
+                            methods.append(
+                                Function(
+                                    name=method_name,
+                                    element_type="function",
+                                    language="go",
+                                    file=iface_file,
+                                    line=iface_info.get("line", 1),
+                                    context=iface_info.get("context", "")
+                                )
+                            )
+                        
+                    iface = Interface(
+                        name=iface_info.get("name", "unknown"),
+                        element_type="interface",
+                        language="go",
+                        file=iface_file,
+                        line=iface_info.get("line", 1),
+                        docstring=iface_info.get("docstring", ""),
+                        methods=methods,
+                        context=iface_info.get("context", "")
+                    )
+                    module.interfaces.append(iface)
+                    
+                return module
+                
+            except (KeyError, StopIteration) as e:
+                logger.error(f"Error processing package data: {e}")
+                logger.debug(f"Error details: {type(e).__name__} - {str(e)}")
+                logger.debug(f"AST data: {ast_data}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error in _parse_package for {package_path}: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            return None
             
     def get_dependencies(self, element: CodeElement) -> Dict[str, List[CodeElement]]:
         """Get all dependencies of a code element"""
