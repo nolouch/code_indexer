@@ -109,6 +109,10 @@ class KnowledgeBlock(Base):
     content_vec = Column(
         VectorType(1536), nullable=True
     )  # Vector column for embeddings
+    context = Column(Text, nullable=True)
+    context_vec = Column(
+        VectorType(1536), nullable=True
+    )  # Vector column for embeddings
     source_version = Column(String(50), nullable=True)
     source_id = Column(String(36), ForeignKey("source_data.id"), nullable=True)
     created_at = Column(DateTime, default=func.current_timestamp())
