@@ -1,1 +1,32 @@
-*__pycache__*
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Virtual environments
+venv/
+env/
+.env/
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Local data files
+*.db
+*.sqlite3
+test_index.json
+index.json
+
+# Logs
+*.log 

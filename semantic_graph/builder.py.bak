@@ -1,0 +1,323 @@
+from typing import Dict, List, Optional, Any
+import networkx as nx
+from pathlib import Path
+from core.models import CodeRepository, Module, CodeElement
+from .embedders.code import CodeEmbedder
+from .embedders.doc import DocEmbedder
+from .relations import SemanticRelation
+from .db_manager import GraphDBManager
+import os
+
+class SemanticGraphBuilder:
+    """Builds and persists semantic graphs from code analysis results"""
+    
+    def __init__(self, graph: nx.MultiDiGraph, code_embedder: CodeEmbedder, doc_embedder: DocEmbedder):
+        """Initialize builder with graph and embedders.
+        
+        Args:
+            graph: Graph to build
+            code_embedder: Code embedder
+            doc_embedder: Documentation embedder
+        """
+        self.graph = graph
+        self.code_embedder = code_embedder
+        self.doc_embedder = doc_embedder
+        
+    def build_from_repository(self, repo: CodeRepository) -> nx.MultiDiGraph:
+        """Build semantic graph from a code repository.
+        
+        Args:
+            repo: Code repository to analyze
+            
+        Returns:
+            NetworkX graph with semantic information
+        """
+        # 检查 repo 是否为 None
+        if repo is None:
+            return self.graph
+            
+        # Add modules and their elements
+        for module_name, module in repo.modules.items():
+            try:
+                if module is not None:
+                    self._add_module(module)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(f"Error adding module {module_name}: {e}")
+                
+        # Add semantic relations
+        try:
+            self._add_semantic_relations()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Error adding semantic relations: {e}")
+        
+        # Add embeddings
+        try:
+            self._add_embeddings()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Error adding embeddings: {e}")
+        
+        return self.graph
+        
+    def _add_module(self, module: Module):
+        """Add a module and its elements to the graph.
+        
+        Args:
+            module: Module to add to graph
+        """
+        # 检查模块是否为 None
+        if module is None:
+            return
+            
+        # 检查文件属性
+        file_path = getattr(module, 'file', None)
+        # Get module content once
+        module_content = self._get_module_content(file_path) if file_path else None
+        
+        # Add module node
+        self.graph.add_node(
+            module.name,
+            type="module",
+            language=module.language,
+            file=file_path,
+            code_content=module_content
+        )
+        
+        # Add functions
+        for func in module.functions:
+            func_file = getattr(func, 'file', file_path)
+            func_line = getattr(func, 'line', 1)
+            func_code = self._get_code_content(func_file, func_line) if func_file else module_content
+            self.graph.add_node(
+                f"{module.name}.{func.name}",
+                type="function",
+                language=func.language,
+                file=func_file,
+                line=func_line,
+                docstring=getattr(func, 'docstring', ''),
+                code_content=func_code
+            )
+            self.graph.add_edge(
+                module.name,
+                f"{module.name}.{func.name}",
+                type="contains"
+            )
+            
+        # Add classes
+        for cls in module.classes:
+            cls_file = getattr(cls, 'file', file_path)
+            cls_line = getattr(cls, 'line', 1)
+            cls_code = self._get_code_content(cls_file, cls_line) if cls_file else module_content
+            self.graph.add_node(
+                f"{module.name}.{cls.name}",
+                type="class",
+                language=cls.language,
+                file=cls_file,
+                line=cls_line,
+                docstring=getattr(cls, 'docstring', ''),
+                code_content=cls_code
+            )
+            self.graph.add_edge(
+                module.name,
+                f"{module.name}.{cls.name}",
+                type="contains"
+            )
+            
+        # Add interfaces
+        for iface in module.interfaces:
+            iface_file = getattr(iface, 'file', file_path)
+            iface_line = getattr(iface, 'line', 1)
+            iface_code = self._get_code_content(iface_file, iface_line) if iface_file else module_content
+            self.graph.add_node(
+                f"{module.name}.{iface.name}",
+                type="interface",
+                language=iface.language,
+                file=iface_file,
+                line=iface_line,
+                docstring=getattr(iface, 'docstring', ''),
+                code_content=iface_code
+            )
+            self.graph.add_edge(
+                module.name,
+                f"{module.name}.{iface.name}",
+                type="contains"
+            )
+            
+    def _add_semantic_relations(self):
+        """Add semantic relationships between nodes."""
+        # In mock testing, graph.nodes(data=True) might return a dict instead of iterable
+        nodes_data = self.graph.nodes(data=True)
+        # If it's a dict, convert it to iterable of (node, data) pairs
+        if isinstance(nodes_data, dict):
+            nodes_data = nodes_data.items()
+            
+        for node, data in nodes_data:
+            if data.get("type") == "function":
+                # Add call relations
+                for other_node in self.graph.nodes():
+                    if other_node != node and self._has_call_relation(node, other_node):
+                        self.graph.add_edge(
+                            node, other_node,
+                            type="calls",
+                            weight=self._get_call_weight(node, other_node)
+                        )
+                        
+            elif data.get("type") == "class":
+                # Add inheritance relations
+                for other_node in self.graph.nodes():
+                    if other_node != node and self._has_inheritance_relation(node, other_node):
+                        self.graph.add_edge(
+                            node, other_node,
+                            type="inherits",
+                            weight=self._get_inheritance_weight(node, other_node)
+                        )
+                        
+    def _add_embeddings(self):
+        """Add code and documentation embeddings to nodes."""
+        # In mock testing, graph.nodes(data=True) might return a dict instead of iterable
+        nodes_data = self.graph.nodes(data=True)
+        # If it's a dict, convert it to iterable of (node, data) pairs
+        if isinstance(nodes_data, dict):
+            nodes_data = nodes_data.items()
+            
+        # Collect all code contents for batch embedding
+        nodes_with_code = []
+        code_contents = []
+        
+        # Collect all docstrings for batch embedding  
+        nodes_with_doc = []
+        docstrings = []
+        
+        for node, data in nodes_data:
+            # Prefer context field if available, otherwise use code_content
+            if "code_content" in data:
+                if not data["code_content"] and data.get("type") != "module":
+                    # Try to get context from the node's file
+                    try:
+                        element_type = data.get("type", "")
+                        # Since we now have context fields in our objects, prioritize it
+                        # For legacy data, we might still need to read from file
+                        nodes_with_code.append(node)
+                        code_contents.append(data["code_content"])
+                    except Exception as e:
+                        import logging
+                        logging.getLogger(__name__).warning(f"Error getting code content for {node}: {e}")
+                else:
+                    nodes_with_code.append(node)
+                    code_contents.append(data["code_content"])
+                    
+            # Get documentation embedding
+            if "docstring" in data and data["docstring"]:
+                nodes_with_doc.append(node)
+                docstrings.append(data["docstring"])
+        
+        # Batch embed code
+        if nodes_with_code:
+            try:
+                code_embeddings = self.code_embedder.batch_embed(code_contents)
+                
+                for i, node in enumerate(nodes_with_code):
+                    if i < len(code_embeddings):
+                        self.graph.nodes[node]["code_embedding"] = code_embeddings[i]
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(f"Error batch embedding code: {e}")
+                # Fall back to individual embedding
+                for i, node in enumerate(nodes_with_code):
+                    if i < len(code_contents):
+                        try:
+                            self.graph.nodes[node]["code_embedding"] = self.code_embedder.embed(code_contents[i])
+                        except Exception as e2:
+                            logging.getLogger(__name__).error(f"Error embedding code for {node}: {e2}")
+                
+        # Batch embed docstrings
+        if nodes_with_doc:
+            try:
+                doc_embeddings = self.doc_embedder.batch_embed(docstrings)
+                
+                for i, node in enumerate(nodes_with_doc):
+                    if i < len(doc_embeddings):
+                        self.graph.nodes[node]["doc_embedding"] = doc_embeddings[i]
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(f"Error batch embedding docs: {e}")
+                # Fall back to individual embedding
+                for i, node in enumerate(nodes_with_doc):
+                    if i < len(docstrings):
+                        try:
+                            self.graph.nodes[node]["doc_embedding"] = self.doc_embedder.embed(docstrings[i])
+                        except Exception as e2:
+                            logging.getLogger(__name__).error(f"Error embedding doc for {node}: {e2}")
+                
+    def _get_module_content(self, file_path: str) -> Optional[str]:
+        """Get entire module content.
+        
+        Args:
+            file_path: Path to module file
+            
+        Returns:
+            Module content or None if file not found
+        """
+        if not file_path:
+            return None
+            
+        try:
+            # 尝试使用绝对路径打开文件
+            if os.path.isfile(file_path):
+                with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                    return f.read()
+            return None
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Error reading file {file_path}: {e}")
+            return None
+                
+    def _get_code_content(self, file_path: str, line: int, context: int = 5) -> Optional[str]:
+        """Get code content with context.
+        
+        Args:
+            file_path: Path to source file
+            line: Target line number
+            context: Number of context lines before and after
+            
+        Returns:
+            Code content with context or None if file not found
+        """
+        if not file_path:
+            return None
+            
+        try:
+            # 尝试使用绝对路径打开文件
+            if os.path.isfile(file_path):
+                with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                    lines = f.readlines()
+                    start = max(0, line - context - 1)
+                    end = min(len(lines), line + context)
+                    return ''.join(lines[start:end])
+            return None
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Error reading file {file_path}: {e}")
+            return None
+            
+    def _has_call_relation(self, func1: str, func2: str) -> bool:
+        """Check if there is a call relation between functions."""
+        # Implementation depends on language-specific analysis
+        return False
+        
+    def _has_inheritance_relation(self, cls1: str, cls2: str) -> bool:
+        """Check if there is an inheritance relation between classes."""
+        # Implementation depends on language-specific analysis
+        return False
+        
+    def _get_call_weight(self, func1: str, func2: str) -> float:
+        """Get weight of call relation."""
+        # Could be based on call frequency, proximity, etc.
+        return 1.0
+        
+    def _get_inheritance_weight(self, cls1: str, cls2: str) -> float:
+        """Get weight of inheritance relation."""
+        # Could be based on number of inherited methods, etc.
+        return 1.0

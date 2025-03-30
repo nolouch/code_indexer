@@ -5,7 +5,10 @@ from core.models import CodeRepository, Module, CodeElement
 from .embedders.code import CodeEmbedder
 from .embedders.doc import DocEmbedder
 from .relations import SemanticRelation
-from .db_manager import GraphDBManager
+import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 class SemanticGraphBuilder:
     """Builds and persists semantic graphs from code analysis results"""
@@ -31,15 +34,29 @@ class SemanticGraphBuilder:
         Returns:
             NetworkX graph with semantic information
         """
-        # Add modules and their elements
-        for module in repo.modules.values():
-            self._add_module(module)
+        # Check if repo is None
+        if repo is None:
+            return self.graph
             
+        # Add modules and their elements
+        for module_name, module in repo.modules.items():
+            try:
+                if module is not None:
+                    self._add_module(module)
+            except Exception as e:
+                logger.error(f"Error adding module {module_name}: {e}")
+                
         # Add semantic relations
-        self._add_semantic_relations()
+        try:
+            self._add_semantic_relations()
+        except Exception as e:
+            logger.error(f"Error adding semantic relations: {e}")
         
         # Add embeddings
-        self._add_embeddings()
+        try:
+            self._add_embeddings()
+        except Exception as e:
+            logger.error(f"Error adding embeddings: {e}")
         
         return self.graph
         
@@ -49,29 +66,47 @@ class SemanticGraphBuilder:
         Args:
             module: Module to add to graph
         """
-        # Get module content once
-        module_content = self._get_module_content(module.file)
+        # Check if module is None
+        if module is None:
+            return
+            
+        # Prioritize using the context field
+        file_path = getattr(module, 'file', None)
+        module_context = getattr(module, 'context', '')
+        
+        # If no context is available, read from file
+        if not module_context and file_path:
+            module_context = self._get_module_content(file_path)
         
         # Add module node
         self.graph.add_node(
             module.name,
             type="module",
             language=module.language,
-            file=module.file,
-            code_content=module_content
+            file=file_path,
+            code_content=module_context
         )
         
         # Add functions
         for func in module.functions:
-            func_code = self._get_code_content(func.file, func.line) or module_content
+            func_file = getattr(func, 'file', file_path)
+            func_line = getattr(func, 'line', 1)
+            
+            # Prioritize using the context field
+            func_context = getattr(func, 'context', '')
+            
+            # If no context is available, try to read from file
+            if not func_context and func_file:
+                func_context = self._get_code_content(func_file, func_line)
+                
             self.graph.add_node(
                 f"{module.name}.{func.name}",
                 type="function",
                 language=func.language,
-                file=func.file,
-                line=func.line,
-                docstring=func.docstring,
-                code_content=func_code
+                file=func_file,
+                line=func_line,
+                docstring=getattr(func, 'docstring', ''),
+                code_content=func_context
             )
             self.graph.add_edge(
                 module.name,
@@ -81,15 +116,24 @@ class SemanticGraphBuilder:
             
         # Add classes
         for cls in module.classes:
-            cls_code = self._get_code_content(cls.file, cls.line) or module_content
+            cls_file = getattr(cls, 'file', file_path)
+            cls_line = getattr(cls, 'line', 1)
+            
+            # Prioritize using the context field
+            cls_context = getattr(cls, 'context', '')
+            
+            # If no context is available, try to read from file
+            if not cls_context and cls_file:
+                cls_context = self._get_code_content(cls_file, cls_line)
+                
             self.graph.add_node(
                 f"{module.name}.{cls.name}",
                 type="class",
                 language=cls.language,
-                file=cls.file,
-                line=cls.line,
-                docstring=cls.docstring,
-                code_content=cls_code
+                file=cls_file,
+                line=cls_line,
+                docstring=getattr(cls, 'docstring', ''),
+                code_content=cls_context
             )
             self.graph.add_edge(
                 module.name,
@@ -99,15 +143,24 @@ class SemanticGraphBuilder:
             
         # Add interfaces
         for iface in module.interfaces:
-            iface_code = self._get_code_content(iface.file, iface.line) or module_content
+            iface_file = getattr(iface, 'file', file_path)
+            iface_line = getattr(iface, 'line', 1)
+            
+            # Prioritize using the context field
+            iface_context = getattr(iface, 'context', '')
+            
+            # If no context is available, try to read from file
+            if not iface_context and iface_file:
+                iface_context = self._get_code_content(iface_file, iface_line)
+                
             self.graph.add_node(
                 f"{module.name}.{iface.name}",
                 type="interface",
                 language=iface.language,
-                file=iface.file,
-                line=iface.line,
-                docstring=iface.docstring,
-                code_content=iface_code
+                file=iface_file,
+                line=iface_line,
+                docstring=getattr(iface, 'docstring', ''),
+                code_content=iface_context
             )
             self.graph.add_edge(
                 module.name,
@@ -152,48 +205,97 @@ class SemanticGraphBuilder:
         if isinstance(nodes_data, dict):
             nodes_data = nodes_data.items()
             
+        # Collect all code contents for batch embedding
+        nodes_with_code = []
+        code_contents = []
+        
+        # Collect all docstrings for batch embedding  
+        nodes_with_doc = []
+        docstrings = []
+        
         for node, data in nodes_data:
-            # Get code embedding
+            # Prefer context field if available, otherwise use code_content
             if "code_content" in data:
-                data["code_embedding"] = self.code_embedder.embed(data["code_content"])
+                if not data["code_content"] and data.get("type") != "module":
+                    # Try to get context from the node's file
+                    try:
+                        element_type = data.get("type", "")
+                        # Since we now have context fields in our objects, prioritize it
+                        # For legacy data, we might still need to read from file
+                        nodes_with_code.append(node)
+                        code_contents.append(data["code_content"])
+                    except Exception as e:
+                        logger.warning(f"Error getting code content for {node}: {e}")
+                else:
+                    nodes_with_code.append(node)
+                    code_contents.append(data["code_content"])
                     
             # Get documentation embedding
             if "docstring" in data and data["docstring"]:
-                data["doc_embedding"] = self.doc_embedder.embed(data["docstring"])
+                nodes_with_doc.append(node)
+                docstrings.append(data["docstring"])
+        
+        # Batch embed code
+        if nodes_with_code:
+            try:
+                code_embeddings = self.code_embedder.batch_embed(code_contents)
+                
+                for i, node in enumerate(nodes_with_code):
+                    if i < len(code_embeddings):
+                        self.graph.nodes[node]["code_embedding"] = code_embeddings[i]
+            except Exception as e:
+                logger.error(f"Error batch embedding code: {e}")
+                # Fall back to individual embedding
+                for i, node in enumerate(nodes_with_code):
+                    if i < len(code_contents):
+                        try:
+                            self.graph.nodes[node]["code_embedding"] = self.code_embedder.embed(code_contents[i])
+                        except Exception as e2:
+                            logger.error(f"Error embedding code for {node}: {e2}")
+                
+        # Batch embed docstrings
+        if nodes_with_doc:
+            try:
+                doc_embeddings = self.doc_embedder.batch_embed(docstrings)
+                
+                for i, node in enumerate(nodes_with_doc):
+                    if i < len(doc_embeddings):
+                        self.graph.nodes[node]["doc_embedding"] = doc_embeddings[i]
+            except Exception as e:
+                logger.error(f"Error batch embedding docs: {e}")
+                # Fall back to individual embedding
+                for i, node in enumerate(nodes_with_doc):
+                    if i < len(docstrings):
+                        try:
+                            self.graph.nodes[node]["doc_embedding"] = self.doc_embedder.embed(docstrings[i])
+                        except Exception as e2:
+                            logger.error(f"Error embedding doc for {node}: {e2}")
                 
     def _get_module_content(self, file_path: str) -> Optional[str]:
-        """Get entire module content.
-        
-        Args:
-            file_path: Path to module file
-            
-        Returns:
-            Module content or None if file not found
-        """
+        """Get the content of a module from its file."""
         try:
-            with open(file_path) as f:
-                return f.read()
-        except Exception:
+            # Try to open the file using the absolute path
+            with open(file_path, 'r', encoding='utf-8') as file:
+                return file.read()
+        except (FileNotFoundError, IOError) as e:
+            logger.warning(f"Error reading module content from {file_path}: {e}")
             return None
                 
     def _get_code_content(self, file_path: str, line: int, context: int = 5) -> Optional[str]:
-        """Get code content with context.
-        
-        Args:
-            file_path: Path to source file
-            line: Target line number
-            context: Number of context lines before and after
-            
-        Returns:
-            Code content with context or None if file not found
-        """
+        """Get code content with context lines."""
         try:
-            with open(file_path) as f:
-                lines = f.readlines()
-                start = max(0, line - context - 1)
-                end = min(len(lines), line + context)
+            # Try to open the file using the absolute path
+            with open(file_path, 'r', encoding='utf-8') as file:
+                lines = file.readlines()
+                
+                # Adjust line number to 0-index and bounds
+                line_index = max(0, line - 1)
+                start = max(0, line_index - context)
+                end = min(len(lines), line_index + context + 1)
+                
                 return ''.join(lines[start:end])
-        except Exception:
+        except (FileNotFoundError, IOError) as e:
+            logger.warning(f"Error reading code content from {file_path}: {e}")
             return None
             
     def _has_call_relation(self, func1: str, func2: str) -> bool:
@@ -207,11 +309,11 @@ class SemanticGraphBuilder:
         return False
         
     def _get_call_weight(self, func1: str, func2: str) -> float:
-        """Get weight of call relation."""
-        # Could be based on call frequency, proximity, etc.
+        """Get the weight of a call relation."""
+        # Implementation depends on language-specific analysis
         return 1.0
         
     def _get_inheritance_weight(self, cls1: str, cls2: str) -> float:
-        """Get weight of inheritance relation."""
-        # Could be based on number of inherited methods, etc.
-        return 1.0
+        """Get the weight of an inheritance relation."""
+        # Implementation depends on language-specific analysis
+        return 1.0 
