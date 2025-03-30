@@ -188,7 +188,7 @@ class GraphDBManager:
         # Log tables being created
         logger.info(f"Tables created: {list(Base.metadata.tables.keys())}")
         
-        # 检测数据库类型
+        # Detect database type
         db_type = "unknown"
         if self.db_url:
             if 'tidb' in self.db_url:
@@ -198,11 +198,11 @@ class GraphDBManager:
             elif 'sqlite' in self.db_url:
                 db_type = "sqlite"
                 
-        # 只有 TiDB 和部分 MySQL 支持向量索引
+        # Only TiDB and some MySQL versions support vector indexes
         if db_type in ["tidb", "mysql"]:
             with SessionLocal() as session:
                 try:
-                    # 首先确保表有 TiFlash 副本，向量索引功能需要 TiFlash
+                    # First ensure the table has a TiFlash replica, which is required for vector index functionality
                     session.execute(text("""
                         ALTER TABLE nodes SET TIFLASH REPLICA 1
                     """))
@@ -211,7 +211,7 @@ class GraphDBManager:
                     logger.warning(f"Creating TiFlash replica failed, vector index may not work: {e}")
                 
                 try:
-                    # 使用正确的 TiDB 向量索引语法创建 code_embedding 的向量索引
+                    # Use the correct TiDB vector index syntax to create vector index for code_embedding
                     session.execute(text("""
                         CREATE VECTOR INDEX IF NOT EXISTS idx_code_vector_cosine 
                         ON nodes ((VEC_COSINE_DISTANCE(code_embedding))) USING HNSW
@@ -227,7 +227,7 @@ class GraphDBManager:
                     logger.warning(f"Code vector index creation failed: {e}")
                     
                 try:
-                    # 使用正确的 TiDB 向量索引语法创建 doc_embedding 的向量索引
+                    # Use the correct TiDB vector index syntax to create vector index for doc_embedding
                     session.execute(text("""
                         CREATE VECTOR INDEX IF NOT EXISTS idx_doc_vector_cosine 
                         ON nodes ((VEC_COSINE_DISTANCE(doc_embedding))) USING HNSW
