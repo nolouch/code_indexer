@@ -3,15 +3,15 @@ from typing import Dict, List, Optional, Any, Union, Tuple, Callable
 from pathlib import Path
 from math import ceil
 import numpy as np
-
+import time
 from knowledgebase.doc_model import (
     Concept,
-    SubConcept,
     KnowledgeBlock,
     SourceData,
     Relationship,
+    SubconceptKnowledgeMapping,
 )
-from utils.json_utils import extract_json_array
+from utils.json_utils import extract_json_array, extract_json
 from utils.token import calculate_tokens
 from setting.db import SessionLocal
 from llm.factory import LLMInterface
@@ -235,6 +235,50 @@ class DocBuilder:
                 print(f"Failed to parse knowledge blocks from {path}")
 
         return blocks
+
+    def agument_block_context(self, knowledge_blocks: dict) -> dict:
+        CHUNK_CONTEXT_PROMPT = """
+<document>
+{doc_content}
+</document>
+
+Here is the chunk we want to situate within the whole document
+<chunk>
+{chunk_content}
+</chunk>
+
+Please give a short succinct context to situate this chunk within the overall document for the purposes of improving search retrieval of the chunk.
+Answer only with the succinct context and nothing else.
+"""
+
+        block_context = {}
+        for kb in knowledge_blocks:
+            prompt = CHUNK_CONTEXT_PROMPT.format(
+                doc_content=kb["source_content"], chunk_content=kb["content"]
+            )
+
+            retry_count = 0
+            while retry_count < 3:
+                try:
+                    response = self.llm_client.generate(prompt)
+                    block_context[kb["id"]] = response
+                    print(f"Generated context for {kb['id']}")
+                    break
+                except Exception as e:
+                    print(f"Failed to generate context for {kb['id']}, error: {e}")
+                    time.sleep(60)
+                    retry_count += 1
+
+        with SessionLocal() as db:
+            for id, context in block_context.items():
+                kb = db.query(KnowledgeBlock).filter(KnowledgeBlock.id == id).first()
+                kb.context = context
+                kb.context_vec = self.embedding_func(context)
+                db.add(kb)
+
+            db.commit()
+
+        return block_context
 
     def analyze_concepts(self, concept_file: Optional[str] = None) -> List[Concept]:
         concepts = []
