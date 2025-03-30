@@ -9,13 +9,13 @@ from knowledgebase.doc_model import (
     KnowledgeBlock,
     SourceData,
     Relationship,
-    SubconceptKnowledgeMapping,
 )
 from utils.json_utils import extract_json_array, extract_json
 from utils.token import calculate_tokens
 from setting.db import SessionLocal
 from llm.factory import LLMInterface
 from llm.embedding import get_text_embedding
+from knowledgebase.doc_spec import GraphSpec
 
 
 class DocBuilder:
@@ -33,6 +33,7 @@ class DocBuilder:
         """
         self.embedding_func = embedding_func
         self.llm_client = llm_client
+        self.spec = GraphSpec()
 
     def _default_embedding_func(self, text: str) -> np.ndarray:
         return get_text_embedding(text, "text-embedding-3-small")
@@ -167,9 +168,7 @@ class DocBuilder:
             doc_content = self._read_file(path)
 
             # Extract knowledge blocks using LLM
-            prompt_template = self.graph_spec.get_extraction_prompt(
-                "knowledge_qa_extraction"
-            )
+            prompt_template = self.spec.get_extraction_prompt("qa_extraction")
             prompt = prompt_template.format(text=doc_content)
             response = self.llm_client.generate(prompt)
 
@@ -237,23 +236,10 @@ class DocBuilder:
         return blocks
 
     def agument_block_context(self, knowledge_blocks: dict) -> dict:
-        CHUNK_CONTEXT_PROMPT = """
-<document>
-{doc_content}
-</document>
-
-Here is the chunk we want to situate within the whole document
-<chunk>
-{chunk_content}
-</chunk>
-
-Please give a short succinct context to situate this chunk within the overall document for the purposes of improving search retrieval of the chunk.
-Answer only with the succinct context and nothing else.
-"""
-
+        prompt_template = self.spec.get_extraction_prompt("chunk_agument")
         block_context = {}
         for kb in knowledge_blocks:
-            prompt = CHUNK_CONTEXT_PROMPT.format(
+            prompt = prompt_template.format(
                 doc_content=kb["source_content"], chunk_content=kb["content"]
             )
 
@@ -280,107 +266,117 @@ Answer only with the succinct context and nothing else.
 
         return block_context
 
-    def analyze_concepts(self, concept_file: Optional[str] = None) -> List[Concept]:
+    def analyze_concepts(
+        self,
+        topic: str,
+        source_ids: Optional[List[str]] = None,
+    ) -> List[Concept]:
         concepts = []
-
-        # Load predefined concepts if provided
-        if concept_file:
-            try:
-                with open(concept_file, "r") as f:
-                    predefined_concepts = json.load(f)
-
-                with SessionLocal() as db:
-                    for concept_data in predefined_concepts:
-                        concept = Concept(
-                            name=concept_data.get("name", ""),
-                            definition=concept_data.get("definition", ""),
-                            definition_vec=self.embedding_func(
-                                concept_data.get("definition", "")
-                            ),
-                            version=concept_data.get("version", "1.0"),
-                        )
-                        db.add(concept)
-
-                    db.commit()
-
-                return predefined_concepts
-            except Exception as e:
-                raise ValueError(f"Error loading concepts from file: {e}")
-
+        block_batches = []
         with SessionLocal() as db:
-            knowledge_blocks = (
-                db.query(KnowledgeBlock.name, KnowledgeBlock.content).filter().all()
-            )
+            # get knowledge blocks from source ids
+            if source_ids:
+                knowledge_blocks = (
+                    db.query(
+                        KnowledgeBlock.id, KnowledgeBlock.name, KnowledgeBlock.content
+                    )
+                    .filter(KnowledgeBlock.source_id.in_(source_ids))
+                    .all()
+                )
+            else:
+                knowledge_blocks = db.query(
+                    KnowledgeBlock.id, KnowledgeBlock.name, KnowledgeBlock.content
+                ).all()
+
             if not knowledge_blocks:
                 print("No knowledge blocks available for concept extraction")
                 return []
 
-            # split knowledges block into batches that have 10000 tokens
-            total_tokens = 0
-            for i, kb in enumerate(knowledge_blocks):
-                tokens = calculate_tokens(kb.content)
-                total_tokens += tokens
+        # split knowledges block into batches that have 7000 tokens
+        total_token_count = 0
+        for i, kb in enumerate(knowledge_blocks):
+            token_count = calculate_tokens(kb.content)
+            total_token_count += token_count
 
-            knowledge_blocks_batches = []
-            index = 0
-            batch_size = ceil(total_tokens / (ceil(total_tokens / 10000)))
-            for kb in knowledge_blocks:
-                if total_tokens > batch_size:
-                    knowledge_blocks_batches.append(knowledge_blocks[index : i + 1])
-                    index = i + 1
-                    total_tokens = 0
+        block_batch = []
+        batch_size = ceil(total_token_count / (ceil(total_token_count / 5000)))
+        for kb in knowledge_blocks:
+            token_count = calculate_tokens(kb.content)
+            total_token_count += token_count
+            block_batch.append(kb)
+            if total_token_count > batch_size:
+                block_batches.append(block_batch)
+                block_batch = []
+                total_token_count = 0
 
-            if index < len(knowledge_blocks):
-                knowledge_blocks_batches.append(knowledge_blocks[index:])
+        if len(block_batch) > 0:
+            block_batches.append(block_batch)
 
-            print(f"Splitted {len(knowledge_blocks_batches)} batches")
+        print(f"Splitted {len(block_batches)} batches")
 
-            for batches in knowledge_blocks_batches:
-                # Combine knowledge blocks for analysis
-                combined_blocks = "\n\n".join(
-                    [f"Block: {kb.name}\nContent: {kb.content}" for kb in batches]
-                )
+        for block_batch in block_batches:
+            # Combine knowledge blocks for analysis
+            combined_blocks = "\n\n".join(
+                [
+                    f"Block: {kb.name}(id={kb.id})\nContent: {kb.content}"
+                    for kb in block_batch
+                ]
+            )
 
-                if combined_blocks.strip() == "":
-                    print(f"Skipping empty batch")
-                    continue
+            if combined_blocks.strip() == "":
+                print(f"Skipping empty batch")
+                continue
 
-                # Extract concepts using LLM
-                prompt_format = self.graph_spec.get_extraction_prompt(
-                    "concept_extraction"
-                )
-                prompt = prompt_format.format(text=combined_blocks)
-                try:
-                    response = self.llm_client.generate(prompt)
-                except Exception as e:
-                    print(
-                        f"Failed to extract concepts from {combined_blocks}, error: {e}"
-                    )
-                    import time
+            # Extract concepts using LLM
+            prompt_format = self.spec.get_extraction_prompt("concept_extraction")
+            prompt = prompt_format.format(text=combined_blocks, topic=topic)
+            try:
+                response = self.llm_client.generate(prompt)
+            except Exception as e:
+                print(f"Failed to extract concepts from {combined_blocks}, error: {e}")
+                import time
 
-                    time.sleep(60)
-                    response = self.llm_client.generate(prompt)
+                time.sleep(60)
+                response = self.llm_client.generate(prompt)
 
-                try:
-                    response_json_str = extract_json_array(response)
-                    # Parse JSON response
-                    extracted_concepts = json.loads(response_json_str)
+            try:
+                response_json_str = extract_json_array(response)
+                # Parse JSON response
+                extracted_concepts = json.loads(response_json_str)
+                for concept_data in extracted_concepts:
+                    print(concept_data["name"])
+                    print(concept_data["definition"])
+                    print(concept_data["reference_ids"])
+                    print("-" * 100)
 
-                    # Create and add concepts
-                    for concept_data in extracted_concepts:
-                        concept = Concept(
-                            name=concept_data.get("name", ""),
-                            definition=concept_data.get("definition", ""),
-                            definition_vec=self.embedding_func(
-                                concept_data.get("definition", "")
-                            ),
-                            version="1.0",
+                # Create and add concepts
+                for concept_data in extracted_concepts:
+                    source_ids = concept_data.get("reference_ids", [])
+                    if len(source_ids) == 0:
+                        print(
+                            f"Skipping concept {concept_data.get('name', '')} because it has no source ids"
                         )
-                        db.add(concept)
-                    concepts.append(extracted_concepts)
-                    print(f"Extracted {len(extracted_concepts)} concepts")
-                except (json.JSONDecodeError, TypeError):
-                    print("Failed to parse concepts from LLM response")
+                        continue
+
+                    concept = {
+                        "name": concept_data.get("name", ""),
+                        "definition": concept_data.get("definition", ""),
+                        "version": "1.0",
+                        "source_ids": concept_data.get("reference_ids", []),
+                    }
+                    concepts.append(concept)
+                print(f"Extracted {len(extracted_concepts)} concepts")
+            except (json.JSONDecodeError, TypeError):
+                print("Failed to parse concepts from LLM response")
+
+        with SessionLocal() as db:
+            for concept in concepts:
+                db.add(
+                    Concept(
+                        **concept,
+                        definition_vec=self.embedding_func(concept["definition"]),
+                    )
+                )
             db.commit()
 
         return concepts
