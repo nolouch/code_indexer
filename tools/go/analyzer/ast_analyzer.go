@@ -5,8 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"go/ast"
+	"go/parser"
+	"go/token"
 	"go/types"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"golang.org/x/tools/go/packages"
@@ -75,9 +78,9 @@ func main() {
 	var pkgs []*packages.Package
 	var err error
 
-	// 如果提供了目录路径，则使用目录路径进行分析
+	// If a directory path is provided, use it for analysis
 	if *dirPath != "" {
-		// 将工作目录设置为指定目录
+		// Set the working directory to the specified directory
 		oldDir, err := os.Getwd()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error getting current directory: %v\n", err)
@@ -90,26 +93,38 @@ func main() {
 			os.Exit(1)
 		}
 
-		// 分析目录中的所有Go文件
+		// Analyze all Go files in the directory
 		pkgs, err = packages.Load(cfg, "./...")
 
-		// 恢复原工作目录
+		// Restore the original working directory
 		_ = os.Chdir(oldDir)
 	} else {
-		// 使用包路径进行分析
+		// Use the package path for analysis
 		pkgs, err = packages.Load(cfg, *pkgPath)
 	}
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading package: %v\n", err)
-		os.Exit(1)
+		// Try direct file processing instead of exiting immediately
+	}
+
+	// Check if we need to process files directly (if package loading failed or returned empty)
+	if len(pkgs) == 0 || (len(pkgs) > 0 && len(pkgs[0].Syntax) == 0) {
+		// Try to process files directly
+		result := processDirectFiles(*dirPath)
+
+		// Output the result
+		output, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Println(string(output))
+		return
 	}
 
 	result := make(map[string]PackageInfo)
 
 	for _, pkg := range pkgs {
 		if pkg.Errors != nil {
-			continue
+			fmt.Fprintf(os.Stderr, "Package %s has errors: %v\n", pkg.PkgPath, pkg.Errors)
+			// Continue anyway with as much information as we have
 		}
 
 		pkgInfo := PackageInfo{
@@ -128,6 +143,9 @@ func main() {
 			}
 		}
 
+		// Map to track method receivers for organizing methods with their structs
+		structMethods := make(map[string][]string)
+
 		// Analyze package contents
 		for _, f := range pkg.Syntax {
 			ast.Inspect(f, func(n ast.Node) bool {
@@ -136,6 +154,23 @@ func main() {
 					// Get function info
 					fInfo := analyzeFuncDecl(node, pkg, f)
 					pkgInfo.Functions = append(pkgInfo.Functions, fInfo)
+
+					// If this is a method, record it for the struct
+					if node.Recv != nil && len(node.Recv.List) > 0 {
+						var receiverType string
+						switch t := node.Recv.List[0].Type.(type) {
+						case *ast.StarExpr:
+							if ident, ok := t.X.(*ast.Ident); ok {
+								receiverType = ident.Name
+							}
+						case *ast.Ident:
+							receiverType = t.Name
+						}
+
+						if receiverType != "" {
+							structMethods[receiverType] = append(structMethods[receiverType], node.Name.Name)
+						}
+					}
 
 				case *ast.TypeSpec:
 					// Get type info (struct or interface)
@@ -152,7 +187,20 @@ func main() {
 			})
 		}
 
+		// Add method information to each struct
+		for i, structInfo := range pkgInfo.Structs {
+			if methods, ok := structMethods[structInfo.Name]; ok {
+				pkgInfo.Structs[i].Methods = methods
+			}
+		}
+
 		result[pkg.PkgPath] = pkgInfo
+	}
+
+	// Ensure we have at least one package in the result
+	if len(result) == 0 {
+		// Process files directly as a fallback
+		result = processDirectFiles(*dirPath)
 	}
 
 	// Output results
@@ -171,6 +219,251 @@ func main() {
 		output, _ := json.MarshalIndent(result, "", "  ")
 		fmt.Println(string(output))
 	}
+}
+
+// Function to process files directly, used when package loading fails
+func processDirectFiles(dirPath string) map[string]PackageInfo {
+	result := make(map[string]PackageInfo)
+
+	// Default package info
+	pkgInfo := PackageInfo{
+		Name: "main", // Assume main package for simplicity
+		Path: dirPath,
+	}
+
+	// Find .go files
+	var goFiles []string
+	if dirPath != "" {
+		entries, err := os.ReadDir(dirPath)
+		if err == nil {
+			for _, entry := range entries {
+				if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".go") && !strings.HasSuffix(entry.Name(), "_test.go") {
+					filePath := filepath.Join(dirPath, entry.Name())
+					goFiles = append(goFiles, filePath)
+
+					// Process this file
+					processGoFile(filePath, &pkgInfo)
+				}
+			}
+		}
+	}
+
+	pkgInfo.Files = goFiles
+
+	// If dirPath is empty, use a default key
+	key := dirPath
+	if key == "" {
+		key = "."
+	}
+
+	result[key] = pkgInfo
+	return result
+}
+
+// Process a single Go file and update package info
+func processGoFile(filePath string, pkgInfo *PackageInfo) {
+	fset := token.NewFileSet()
+	node, err := parser.ParseFile(fset, filePath, nil, parser.ParseComments)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing file %s: %v\n", filePath, err)
+		return
+	}
+
+	// Update package name if it was unknown
+	if pkgInfo.Name == "unknown" {
+		pkgInfo.Name = node.Name.Name
+	}
+
+	// Map to track method receivers
+	structMethods := make(map[string][]string)
+
+	// Extract imports
+	for _, imp := range node.Imports {
+		impPath := strings.Trim(imp.Path.Value, "\"")
+		if !contains(pkgInfo.Imports, impPath) {
+			pkgInfo.Imports = append(pkgInfo.Imports, impPath)
+		}
+	}
+
+	// Extract declarations
+	for _, decl := range node.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			// Process function declaration
+			fInfo := FunctionInfo{
+				Name:    d.Name.Name,
+				Package: pkgInfo.Name,
+				File:    filePath,
+				Line:    fset.Position(d.Pos()).Line,
+				Context: getNodeContentFromFset(d, fset, filePath),
+			}
+
+			// Get docstring
+			if d.Doc != nil {
+				fInfo.DocString = d.Doc.Text()
+			}
+
+			// Check if it's a method
+			if d.Recv != nil && len(d.Recv.List) > 0 {
+				var receiverType string
+				switch t := d.Recv.List[0].Type.(type) {
+				case *ast.StarExpr:
+					if ident, ok := t.X.(*ast.Ident); ok {
+						receiverType = ident.Name
+					}
+				case *ast.Ident:
+					receiverType = t.Name
+				}
+
+				fInfo.ReceiverType = receiverType
+
+				// Add to method map for later struct association
+				if receiverType != "" {
+					structMethods[receiverType] = append(structMethods[receiverType], d.Name.Name)
+				}
+			}
+
+			// Extract function calls with improved detection
+			if d.Body != nil {
+				ast.Inspect(d.Body, func(n ast.Node) bool {
+					if call, ok := n.(*ast.CallExpr); ok {
+						switch fun := call.Fun.(type) {
+						case *ast.SelectorExpr:
+							// Handle method calls (e.g., obj.Method())
+							fInfo.Calls = append(fInfo.Calls, fun.Sel.Name)
+						case *ast.Ident:
+							// Handle direct function calls (e.g., Function())
+							fInfo.Calls = append(fInfo.Calls, fun.Name)
+						case *ast.FuncLit:
+							// Handle anonymous function calls - just add a placeholder
+							fInfo.Calls = append(fInfo.Calls, "anonymous")
+						case *ast.CallExpr:
+							// Handle chained calls like a(b()) - focus on the inner call
+							// We continue inspecting and will catch the inner call separately
+						default:
+							// Other types of calls, just mark as unknown
+							fmt.Fprintf(os.Stderr, "Unknown call type: %T in %s\n", fun, fInfo.Name)
+						}
+					}
+					return true
+				})
+			}
+
+			pkgInfo.Functions = append(pkgInfo.Functions, fInfo)
+
+		case *ast.GenDecl:
+			// Look for type declarations
+			for _, spec := range d.Specs {
+				if ts, ok := spec.(*ast.TypeSpec); ok {
+					switch t := ts.Type.(type) {
+					case *ast.StructType:
+						// Process struct
+						sInfo := StructInfo{
+							Name:    ts.Name.Name,
+							Package: pkgInfo.Name,
+							File:    filePath,
+							Line:    fset.Position(ts.Pos()).Line,
+							Context: fmt.Sprintf("type %s %s", ts.Name.Name, getNodeContentFromFset(t, fset, filePath)),
+						}
+
+						// Get docstring
+						if d.Doc != nil {
+							sInfo.DocString = d.Doc.Text()
+						}
+
+						// Extract fields
+						for _, field := range t.Fields.List {
+							if field.Names != nil && len(field.Names) > 0 {
+								fInfo := FieldInfo{
+									Name: field.Names[0].Name,
+									Type: getTypeString(field.Type),
+								}
+
+								if field.Tag != nil {
+									fInfo.Tag = field.Tag.Value
+								}
+
+								sInfo.Fields = append(sInfo.Fields, fInfo)
+							}
+						}
+
+						pkgInfo.Structs = append(pkgInfo.Structs, sInfo)
+
+					case *ast.InterfaceType:
+						// Process interface
+						iInfo := InterfaceInfo{
+							Name:    ts.Name.Name,
+							Package: pkgInfo.Name,
+							File:    filePath,
+							Line:    fset.Position(ts.Pos()).Line,
+							Context: fmt.Sprintf("type %s %s", ts.Name.Name, getNodeContentFromFset(t, fset, filePath)),
+						}
+
+						// Get docstring
+						if d.Doc != nil {
+							iInfo.DocString = d.Doc.Text()
+						}
+
+						// Extract methods
+						for _, method := range t.Methods.List {
+							if len(method.Names) > 0 {
+								iInfo.Methods = append(iInfo.Methods, method.Names[0].Name)
+							}
+						}
+
+						pkgInfo.Interfaces = append(pkgInfo.Interfaces, iInfo)
+					}
+				}
+			}
+		}
+	}
+
+	// Associate methods with structs
+	for i, structInfo := range pkgInfo.Structs {
+		if methods, ok := structMethods[structInfo.Name]; ok {
+			pkgInfo.Structs[i].Methods = methods
+		}
+	}
+}
+
+// Get string representation of a type
+func getTypeString(expr ast.Expr) string {
+	switch t := expr.(type) {
+	case *ast.Ident:
+		return t.Name
+	case *ast.StarExpr:
+		return "*" + getTypeString(t.X)
+	case *ast.ArrayType:
+		if t.Len == nil {
+			return "[]" + getTypeString(t.Elt)
+		}
+		return "[?]" + getTypeString(t.Elt)
+	case *ast.MapType:
+		return "map[" + getTypeString(t.Key) + "]" + getTypeString(t.Value)
+	default:
+		return "unknown"
+	}
+}
+
+// Get content of a node using a fileset
+func getNodeContentFromFset(node ast.Node, fset *token.FileSet, filename string) string {
+	start := fset.Position(node.Pos())
+	end := fset.Position(node.End())
+
+	// Read the source file
+	content, err := os.ReadFile(filename)
+	if err != nil {
+		return ""
+	}
+
+	// Convert byte positions to array indices
+	startOffset := start.Offset
+	endOffset := end.Offset
+
+	if startOffset >= 0 && endOffset >= 0 && endOffset <= len(content) {
+		return string(content[startOffset:endOffset])
+	}
+	return ""
 }
 
 func getNodeContent(node ast.Node, pkg *packages.Package) string {
@@ -223,17 +516,31 @@ func analyzeFuncDecl(node *ast.FuncDecl, pkg *packages.Package, file *ast.File) 
 		info.DocString = node.Doc.Text()
 	}
 
-	// Get function calls
-	ast.Inspect(node.Body, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok {
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-				info.Calls = append(info.Calls, sel.Sel.Name)
-			} else if ident, ok := call.Fun.(*ast.Ident); ok {
-				info.Calls = append(info.Calls, ident.Name)
+	// Get function calls - improved detection
+	if node.Body != nil {
+		ast.Inspect(node.Body, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				switch fun := call.Fun.(type) {
+				case *ast.SelectorExpr:
+					// Handle method calls (e.g., obj.Method())
+					info.Calls = append(info.Calls, fun.Sel.Name)
+				case *ast.Ident:
+					// Handle direct function calls (e.g., Function())
+					info.Calls = append(info.Calls, fun.Name)
+				case *ast.FuncLit:
+					// Handle anonymous function calls - just add a placeholder
+					info.Calls = append(info.Calls, "anonymous")
+				case *ast.CallExpr:
+					// Handle chained calls like a(b()) - focus on the inner call
+					// We continue inspecting and will catch the inner call separately
+				default:
+					// Other types of calls, just mark as unknown
+					fmt.Fprintf(os.Stderr, "Unknown call type: %T in %s\n", fun, info.Name)
+				}
 			}
-		}
-		return true
-	})
+			return true
+		})
+	}
 
 	return info
 }

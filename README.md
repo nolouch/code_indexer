@@ -122,6 +122,22 @@ python -m pytest tests/test_semantic_graph_builder.py
 
 # Run tests for Go parser
 python -m pytest tests/test_go_parser.py
+
+# Run tests for the indexers
+python -m tests.indexers.test_indexer
+python -m tests.indexers.test_simple_indexer
+```
+
+### Test Directory Structure
+
+```
+tests/
+├── indexers/                # Tests for code indexers
+│   ├── test_indexer.py      # Tests for the database-enabled indexer
+│   └── test_simple_indexer.py # Tests for the standalone indexer
+├── test_go_parser.py        # Tests for Go parser
+├── test_semantic_graph_builder.py # Tests for graph builder
+└── test_core_models.py      # Tests for core data models
 ```
 
 ### Running Tests with Verbose Output

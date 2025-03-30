@@ -32,3 +32,5 @@ index.json
 *.log 
 
 .env
+
+tools/go/analyzer/ast_analyzer
