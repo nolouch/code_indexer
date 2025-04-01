@@ -83,6 +83,69 @@ JSON Output (surround with ```json and ```):
 ]
 ```"""
 
+gen_pr_review_best_practices_prompt = """Your task is to analyze a GitHub Pull Request (PR) and extract high-confidence, reusable best practices organized with simple tags. 
+Your goal is to create a structured knowledge entry that can be added to a PR Review Best Practices knowledge base.
+
+PR and its review comments:
+{pr_review_comments}
+
+Follow these steps:
+
+1. Analyze the PR content, focusing on:
+   - The type of changes being made (e.g., protocol buffer updates, API changes)
+   - The specific review comments made by human reviewers
+   - Common patterns or concerns raised during the review
+
+2. Categorize the PR using the following primary tags (select 1-2 most relevant tags):
+   - proto: Protocol definition related changes
+   - api: API design related changes
+   - database: Database related changes
+   - security: Security related changes
+   - performance: Performance related changes
+   - config: Configuration related changes
+   - test: Testing related changes
+   - docs: Documentation related changes
+   - ui: User interface related changes
+   - refactor: Code refactoring related changes
+
+3. Identify only the best practices that:
+   - Have clear evidence in the PR review comments
+   - Are technical in nature (not about process or style)
+   - Would clearly apply to similar PRs in the future
+   - Address substantive concerns rather than minor issues
+   - You are confident can be reused in similar situations
+   - For each best practice, provide a detailed, meaningful guideline with evidence from the PR, make the guideline clear and comprehensive, with reference if possible. The guideline should be able to be reused separately.
+
+4. Format your response as a JSON object with the following structure:   
+
+```json
+{{
+  "pr_summary": "Brief description of the PR",
+  "best_practices": [
+    {{
+      "tag": "code/proto/field/deprecate",
+      "guidelines": "Specific and comprehensive guideline with evidence from the PR",
+      "confidence": "high|medium",
+      "evidence": "Specific PR comments or discussions supporting these best practices"
+    }},
+    // Additional tagged best practices as needed
+  ],
+  "search_guide": {{
+    "pr_types": ["Protocol buffer field deprecation", "Protobuf schema changes", "Proto compatibility updates"],
+    "common_questions": ["Best practices for deprecating proto fields", "How to handle backward compatibility in protobuf"]
+  }}
+}}
+```
+
+5. For each best practice, consider:
+    - Is this a one-off issue or a recurring pattern?
+    - Would this guidance help prevent similar issues in future PRs?
+    - Is this specific enough to be actionable without being too narrow?
+    - Is there clear evidence in the PR that this is important?
+
+The output should be a well-structured JSON object with a simple tag system that enables reviewers to efficiently find relevant guidelines when reviewing similar PRs in the future.
+"""
+
 chunk_agument_prompt = """<document>
 {doc_content}
 </document>

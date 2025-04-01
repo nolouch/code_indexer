@@ -4,7 +4,9 @@ import logging
 from dotenv import load_dotenv
 
 # Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 load_dotenv()
@@ -21,7 +23,6 @@ OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 DATABASE_URI = os.environ.get("DATABASE_URI")
 if DATABASE_URI == "":
     DATABASE_URI = None
-logger.info(f"Using database URI: {DATABASE_URI}")
 
 # Ensure SESSION_POOL_SIZE is an integer
 SESSION_POOL_SIZE = int(os.environ.get("SESSION_POOL_SIZE", 40))

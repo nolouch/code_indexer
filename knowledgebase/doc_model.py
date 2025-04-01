@@ -2,7 +2,17 @@ import uuid
 from typing import Dict, List, Literal, Optional, Any, Union
 from dataclasses import dataclass, field
 from datetime import datetime
-from sqlalchemy import Column, String, Text, ForeignKey, DateTime, Enum, Index, JSON
+from sqlalchemy import (
+    Column,
+    String,
+    Text,
+    ForeignKey,
+    DateTime,
+    Enum,
+    Index,
+    JSON,
+    ForeignKeyConstraint,
+)
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import relationship
@@ -11,6 +21,29 @@ from sqlalchemy.sql import func
 from tidb_vector.sqlalchemy import VectorType
 
 Base = declarative_base()
+
+
+class BestPractice(Base):
+    __tablename__ = "best_practices"
+
+    id = Column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True
+    )
+    source_id = Column(String(255), nullable=True)
+    tag = Column(String(255), nullable=True)
+    guideline = Column(JSON, nullable=True)
+    guideline_vec = Column(
+        VectorType(1536), nullable=True
+    )  # Vector column for embeddings
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (Index("idx_source_id", "source_id"),)
+
+    def __repr__(self):
+        return (
+            f"<BestPractice(id={self.id}, source_id={self.source_id}, tag={self.tag})>"
+        )
 
 
 class Concept(Base):
