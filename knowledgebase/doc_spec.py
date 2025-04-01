@@ -83,7 +83,11 @@ JSON Output (surround with ```json and ```):
 ]
 ```"""
 
-pr_review_best_practices_prompt = """Your task is to analyze a GitHub Pull Request (PR) and extract high-confidence, reusable best practices organized with simple tags. Your goal is to create a structured knowledge entry that can be added to a PR Review Best Practices knowledge base.
+gen_pr_review_best_practices_prompt = """Your task is to analyze a GitHub Pull Request (PR) and extract high-confidence, reusable best practices organized with simple tags. 
+Your goal is to create a structured knowledge entry that can be added to a PR Review Best Practices knowledge base.
+
+PR and its review comments:
+{pr_review_comments}
 
 Follow these steps:
 
@@ -110,34 +114,27 @@ Follow these steps:
    - Would clearly apply to similar PRs in the future
    - Address substantive concerns rather than minor issues
    - You are confident can be reused in similar situations
+   - For each best practice, provide a detailed, meaningful guideline with evidence from the PR, make the guideline clear and comprehensive, with reference if possible. The guideline should be able to be reused separately.
 
-4. Format your response as a JSON object with the following structure:
+4. Format your response as a JSON object with the following structure:   
 
 ```json
-{
-  "pr_summary": {
-    "title": "Brief description of the PR",
-    "url": "GitHub URL of the PR",
-    "primary_tag": "Main tag (e.g., proto, api, etc.)"
-  },
+{{
+  "pr_summary": "Brief description of the PR",
   "best_practices": [
-    {
+    {{
       "tag": "code/proto/field/deprecate",
-      "guidelines": [
-        "Specific guideline 1 with evidence from the PR",
-        "Specific guideline 2 with evidence from the PR",
-        "Specific guideline 3 with evidence from the PR"
-      ],
+      "guidelines": "Specific and comprehensive guideline with evidence from the PR",
       "confidence": "high|medium",
       "evidence": "Specific PR comments or discussions supporting these best practices"
-    },
+    }},
     // Additional tagged best practices as needed
   ],
-  "search_guide": {
+  "search_guide": {{
     "pr_types": ["Protocol buffer field deprecation", "Protobuf schema changes", "Proto compatibility updates"],
     "common_questions": ["Best practices for deprecating proto fields", "How to handle backward compatibility in protobuf"]
-  }
-}
+  }}
+}}
 ```
 
 5. For each best practice, consider:

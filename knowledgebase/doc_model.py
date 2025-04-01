@@ -23,33 +23,27 @@ from tidb_vector.sqlalchemy import VectorType
 Base = declarative_base()
 
 
-class Tag(Base):
-    __tablename__ = "tags"
+class BestPractice(Base):
+    __tablename__ = "best_practices"
 
     id = Column(
         String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True
     )
-    namespace_name = Column(String(100), nullable=True)
-    name = Column(String(255), nullable=False)
-    description = Column(Text, nullable=True)
-    best_practices = Column(Text, nullable=True)
-    parent_id = Column(String(36), nullable=True)
+    source_id = Column(String(255), nullable=True)
+    tag = Column(String(255), nullable=True)
+    guideline = Column(JSON, nullable=True)
+    guideline_vec = Column(
+        VectorType(1536), nullable=True
+    )  # Vector column for embeddings
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    parent = relationship("Tag", remote_side=[id], backref="children")
-
-    __table_args__ = (
-        ForeignKeyConstraint(["parent_id"], ["tags.id"], name="fk_tag_parent"),
-    )
+    __table_args__ = (Index("idx_source_id", "source_id"),)
 
     def __repr__(self):
-        return f"<Tag(name={self.name}, parent_id={self.parent_id})>"
-
-    @property
-    def is_leaf(self):
-        """Determine if the tag is a leaf node (no children)."""
-        return len(self.children) == 0
+        return (
+            f"<BestPractice(id={self.id}, source_id={self.source_id}, tag={self.tag})>"
+        )
 
 
 class Concept(Base):
