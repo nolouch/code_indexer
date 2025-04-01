@@ -1,6 +1,11 @@
 import os
 import json
+import logging
 from dotenv import load_dotenv
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -12,9 +17,14 @@ GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 
-# DB settings
+# Database settings with fallback to None for empty strings
 DATABASE_URI = os.environ.get("DATABASE_URI")
-SESSION_POOL_SIZE: int = os.environ.get("SESSION_POOL_SIZE", 40)
+if DATABASE_URI == "":
+    DATABASE_URI = None
+logger.info(f"Using database URI: {DATABASE_URI}")
+
+# Ensure SESSION_POOL_SIZE is an integer
+SESSION_POOL_SIZE = int(os.environ.get("SESSION_POOL_SIZE", 40))
 
 
 # Model configurations

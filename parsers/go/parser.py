@@ -70,15 +70,56 @@ class GoParser(LanguageParser):
         # Get all Go packages in the directory
         packages = self._get_packages(str(path))
         
+        # If no packages found, add a default placeholder module
+        if not packages:
+            logger.warning(f"No Go packages found in directory: {directory}")
+            default_module = self._create_default_module(directory)
+            self.repository.modules[directory] = default_module
+            return self.repository
+            
         # Parse each package
+        modules_parsed = 0
         for pkg_path in packages:
             try:
                 module = self._parse_package(pkg_path)
-                self.repository.modules[pkg_path] = module
+                if module:
+                    self.repository.modules[pkg_path] = module
+                    modules_parsed += 1
+                else:
+                    # Create a default module if parsing failed
+                    logger.warning(f"Failed to parse package {pkg_path}, creating a default module")
+                    default_module = self._create_default_module(pkg_path)
+                    self.repository.modules[pkg_path] = default_module
             except Exception as e:
                 logger.error(f"Error parsing package {pkg_path}: {e}")
+                # Create a default module on exception
+                default_module = self._create_default_module(pkg_path)
+                self.repository.modules[pkg_path] = default_module
+        
+        # If no modules were successfully parsed, add a default placeholder
+        if modules_parsed == 0 and not self.repository.modules:
+            logger.warning(f"No modules parsed successfully in directory: {directory}")
+            default_module = self._create_default_module(directory)
+            self.repository.modules[directory] = default_module
                 
         return self.repository
+        
+    def _create_default_module(self, path: str) -> Module:
+        """Create a default module for cases where parsing fails"""
+        logger.info(f"Creating default module for path: {path}")
+        module_name = os.path.basename(path)
+        if not module_name or module_name == '.':
+            module_name = "default"
+            
+        return Module(
+            name=module_name,
+            element_type="package",
+            language="go",
+            file=path,
+            line=1,
+            imports=[],
+            files=[path]
+        )
         
     def parse_file(self, file_path: str) -> Module:
         """Parse a single Go file"""
@@ -216,14 +257,14 @@ class GoParser(LanguageParser):
         """Parse a Go package using the AST analyzer"""
         if not package_path:
             logger.error("Empty package path provided")
-            return None
+            return self._create_default_module("unknown")
             
         if not self.ast_tool_path:
             self.setup()
             
         if not self.initialized:
             logger.error("AST analyzer not initialized. Cannot parse package.")
-            return None
+            return self._create_default_module(package_path)
             
         # Check if package_path is a local filesystem path
         is_filesystem_path = os.path.exists(package_path)
@@ -270,12 +311,12 @@ class GoParser(LanguageParser):
             if result.returncode != 0:
                 logger.warning(f"AST analyzer failed with code {result.returncode}: {result.stderr}")
                 logger.debug(f"Command: {' '.join(cmd)}")
-                return None
+                return self._create_default_module(package_path)
                 
             # If output is empty, package may not have been found
             if not result.stdout or not result.stdout.strip():
                 logger.warning(f"No output from AST analyzer for {package_path}")
-                return None
+                return self._create_default_module(package_path)
                 
             # Parse JSON output
             try:
@@ -286,17 +327,17 @@ class GoParser(LanguageParser):
                 # Safety check: if AST data is None or empty, return early
                 if not ast_data:
                     logger.warning(f"AST data is empty for {package_path}")
-                    return None
+                    return self._create_default_module(package_path)
                     
             except json.JSONDecodeError as e:
                 logger.error(f"Invalid JSON from AST analyzer: {e}")
                 logger.debug(f"JSON snippet: {result.stdout[:200]}...")
-                return None
+                return self._create_default_module(package_path)
                 
             # Check if there is package data
             if not ast_data:
                 logger.warning(f"No packages found in {package_path}")
-                return None
+                return self._create_default_module(package_path)
                 
             # Get the first package information
             try:
@@ -305,7 +346,7 @@ class GoParser(LanguageParser):
                 # Ensure ast_data is a dictionary
                 if not isinstance(ast_data, dict) or not ast_data:
                     logger.warning(f"AST data for {package_path} is not a valid dictionary or is empty")
-                    return None
+                    return self._create_default_module(package_path)
                 
                 # For a package path, we need to look for the specific package
                 if not is_filesystem_path and "." in package_path:
@@ -323,28 +364,29 @@ class GoParser(LanguageParser):
                             pkg_path = next(iter(ast_data))
                         else:
                             logger.warning("AST data is empty, cannot extract package information")
-                            return None
+                            return self._create_default_module(package_path)
                 else:
                     # Get the first package key
                     if ast_data:
                         pkg_path = next(iter(ast_data))
                     else:
                         logger.warning("AST data is empty, cannot extract package information")
-                        return None
+                        return self._create_default_module(package_path)
                 
                 # Ensure pkg_info is a dictionary
                 pkg_info = ast_data.get(pkg_path)
                 if not isinstance(pkg_info, dict) or not pkg_info:
                     logger.warning(f"Package info for {pkg_path} is not a valid dictionary or is empty")
-                    return None
+                    return self._create_default_module(package_path)
                 
                 logger.debug(f"Package info type: {type(pkg_info)}")
                 logger.info(f"Found package {pkg_info.get('name', 'unknown')} at {pkg_path}")
                 
-                # Check if the package has files
-                if not pkg_info.get("files"):
-                    logger.warning(f"Package {pkg_path} has no files")
-                    return None
+                # Create module object even if package has no files
+                # Instead of returning None, create a minimal module
+                module_name = pkg_info.get("name", os.path.basename(package_path))
+                if not module_name:
+                    module_name = os.path.basename(package_path)
                 
                 # Ensure "files" is a list
                 files_list = pkg_info.get("files", [])
@@ -367,19 +409,15 @@ class GoParser(LanguageParser):
                     else:
                         files.append(file_path)
                 
-                if not files:
-                    logger.warning(f"No valid files found for package {pkg_path}")
-                    return None
-                        
-                # Create module object
+                # Create module object with what we have, even if files list is empty
                 module = Module(
-                    name=pkg_info.get("name", os.path.basename(package_path)),
+                    name=module_name,
                     element_type="package",
                     language="go",
-                    file=files[0] if files else "",
+                    file=files[0] if files else package_path,  # Use package_path as fallback
                     line=1,  # Package declaration is usually at line 1
                     imports=pkg_info.get("imports", []),
-                    files=files
+                    files=files if files else [package_path]  # Use package_path as fallback
                 )
                 
                 # Ensure functions, structs, and interfaces are lists before processing
@@ -434,9 +472,49 @@ class GoParser(LanguageParser):
                         fields = []
                         
                     # Ensure methods is a list
-                    methods = struct_info.get("methods", [])
-                    if not isinstance(methods, list):
-                        methods = []
+                    methods_list = struct_info.get("methods", [])
+                    if not isinstance(methods_list, list):
+                        logger.warning(f"Methods for struct {struct_info.get('name', 'unknown')} is not a list")
+                        methods_list = []
+                    
+                    # Convert method names to Function objects
+                    parsed_methods = []
+                    for method_item in methods_list:
+                        # Check what type of method data we have
+                        if isinstance(method_item, str):
+                            # Just a method name, create a minimal Function
+                            logger.debug(f"Got method name as string: {method_item}")
+                            method_func = Function(
+                                name=method_item,
+                                element_type="method",
+                                language="go",
+                                file=struct_file,
+                                line=1,  # Unknown line number
+                                docstring="",
+                                context=f"func ({struct_info.get('name', 'unknown')}) {method_item}()"
+                            )
+                            parsed_methods.append(method_func)
+                        elif isinstance(method_item, dict):
+                            # Method info as dictionary
+                            method_name = method_item.get("name", "unknown")
+                            method_file = method_item.get("file", struct_file)
+                            if method_file and not os.path.isabs(method_file) and is_filesystem_path:
+                                method_file = os.path.join(abs_path, method_file)
+                                
+                            method_func = Function(
+                                name=method_name,
+                                element_type="method",
+                                language="go",
+                                file=method_file,
+                                line=method_item.get("line", 1),
+                                docstring=method_item.get("docstring", ""),
+                                calls=method_item.get("calls", []),
+                                parent_class=struct_info.get("name", ""),
+                                context=method_item.get("context", "")
+                            )
+                            parsed_methods.append(method_func)
+                        else:
+                            logger.warning(f"Unknown method format for struct {struct_info.get('name', 'unknown')}: {type(method_item)}")
                         
                     struct = Class(
                         name=struct_info.get("name", "unknown"),
@@ -450,7 +528,7 @@ class GoParser(LanguageParser):
                             "type": f["type"],
                             "tag": f.get("tag", "")
                         } for f in fields],
-                        methods=methods,
+                        methods=parsed_methods,
                         context=struct_info.get("context", "")
                     )
                     module.classes.append(struct)
@@ -509,13 +587,13 @@ class GoParser(LanguageParser):
                 logger.error(f"Error processing package data: {e}")
                 logger.debug(f"Error details: {type(e).__name__} - {str(e)}")
                 logger.debug(f"AST data: {ast_data}")
-                return None
+                return self._create_default_module(package_path)
                 
         except Exception as e:
             logger.error(f"Error in _parse_package for {package_path}: {e}")
             import traceback
             logger.debug(traceback.format_exc())
-            return None
+            return self._create_default_module(package_path)
             
     def get_dependencies(self, element: CodeElement) -> Dict[str, List[CodeElement]]:
         """Get all dependencies of a code element"""
