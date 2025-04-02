@@ -57,7 +57,9 @@ class BestPracticesKnowledgeBase:
 
         return result
 
-    def add_pr_review_best_practices(self, source_id: str, content: str) -> List[str]:
+    def add_pr_review_best_practices(
+        self, source_id: str, content: str, commit: bool = True
+    ) -> List[str]:
         """
         Generates a best practices for the given content.
 
@@ -88,6 +90,9 @@ class BestPracticesKnowledgeBase:
             raise ValueError(f"Failed to parse tag path JSON: {e}")
 
         bp_result = json.loads(bp_response)
+
+        if not commit:
+            return bp_result
 
         with SessionLocal() as session:
             try:

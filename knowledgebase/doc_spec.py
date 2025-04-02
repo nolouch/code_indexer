@@ -127,7 +127,7 @@ Follow these steps:
    - Required edge case handling: Document specific edge cases that must be handled in particular ways to maintain system integrity.
    When possible, include the reasoning behind these constraints to help developers understand not just what the limitations are, but why they exist.
 
-4. Format your response as a JSON object with the following structure:   
+4. Format your response as a JSON object with the following structure, put all indenfied guidelines (both universal code review guidelines and hidden module constraints) under the "best_practices" field (array of objects):
 
 ```json
 {{
