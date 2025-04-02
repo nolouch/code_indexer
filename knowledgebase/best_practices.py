@@ -3,6 +3,7 @@ from typing import List, Dict, Tuple, Optional, Callable
 import numpy as np
 from sqlalchemy.exc import IntegrityError
 import uuid
+import time
 
 from llm.factory import LLMInterface
 from knowledgebase.doc_model import BestPractice
@@ -45,6 +46,8 @@ class BestPracticesKnowledgeBase:
             )
 
             for bp in best_practices:
+                if bp.distance > 0.7:
+                    continue
                 if bp.source_id not in result:
                     result[bp.source_id] = []
                 result[bp.source_id].append(
