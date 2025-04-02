@@ -72,12 +72,13 @@ class BestPracticesKnowledgeBase:
             List[str]: A list of tag names from root to leaf.
         """
 
-        with SessionLocal() as session:
-            bps = session.query(BestPractice).filter_by(source_id=source_id).all()
-            if bps:
-                raise ValueError(
-                    f"Best practices already exist for source_id: {source_id}"
-                )
+        if commit:
+            with SessionLocal() as session:
+                bps = session.query(BestPractice).filter_by(source_id=source_id).all()
+                if bps:
+                    raise ValueError(
+                        f"Best practices already exist for source_id: {source_id}"
+                    )
 
         prompt = gen_pr_review_best_practices_prompt.format(pr_review_comments=content)
 

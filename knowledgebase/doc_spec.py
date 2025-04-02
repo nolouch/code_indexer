@@ -91,11 +91,13 @@ PR and its review comments:
 
 Follow these steps:
 
-1. Analyze the PR content, focusing on:
-   - The type of changes being made (e.g., protocol buffer updates, API changes)
-   - The specific review comments made by human reviewers
-   - Common patterns or concerns raised during the review
-   - Code Quality issues that could be prevented through better guidelines
+1. Analyze the PR Review Comments
+   - Understand the type of changes being made (e.g., protocol buffer updates, API changes)
+   - Only consider the specific review comments made by human reviewers, ESPECIALLY THOSE THAT WERE ACCEPTED by the PR author. Skip to generate best practices for PR with no accepted review comments, just return an empty list.
+   - Pay special attention to review comments that led to code changes, as these represent validated insights
+   - Identify patterns in what experienced reviewers consistently flag as issues
+   - Look for explanations reviewers provide that reveal deeper understanding of system constraints
+   - MOST IMPORTANTLY: Technical insights that would only be obvious to someone with deep expertise in this domain
 
 2. Categorize the PR using the following primary tags (select 2-3 most relevant tags):
    - code_style: Code style and formatting related changes
@@ -113,21 +115,23 @@ Follow these steps:
 
    Type 1: Universal Code Review Guidelines
    Extract high-value code review insights from the PR that can be applied across projects:
-   - Review checkpoints: Identify key code quality checkpoints that apply to most codebases regardless of their technology stack.
+   - PRIORITIZE NON-OBVIOUS INSIGHTS: Focus on extracting insights that would not be immediately obvious to intermediate developers
    - Evaluation criteria: Summarize universal standards for judging whether code changes are acceptable, including when to request changes and when to accept trade-offs.
    - Common anti-patterns: Identify common code problem patterns that appeared in or were fixed by the PR, which may recur across different projects.
    - Best practices: Extract universal best practices demonstrated in the PR or suggested by reviewers, especially those that provide value across different types of projects.
+  
+   AVOID generic advice like "write tests" or "add documentation" unless the PR reveals specific, non-obvious techniques for doing so effectively.
 
    Type 2: Hidden Module Constraints
    Extract non-obvious limitations or constraints in specific modules/features revealed in the PR:
 
    - Undocumented limitations: Identify restrictions or behaviors that aren't formally documented but are critical for working with the code.
-   - Component interactions: Highlight subtle ways components interact that could cause unexpected issues if not properly understood.
-   - Critical implementation details: Extract important technical details about how the code actually works that aren't immediately apparent from reading the interface.
    - Required edge case handling: Document specific edge cases that must be handled in particular ways to maintain system integrity.
+   - TECHNICAL DEPTH: Include specific thresholds, conditions, or scenarios where these constraints become relevant
+
    When possible, include the reasoning behind these constraints to help developers understand not just what the limitations are, but why they exist.
 
-4. Format your response as a JSON object with the following structure, put all indenfied guidelines (both universal code review guidelines and hidden module constraints) under the "best_practices" field (array of objects):
+4. Format your response as a JSON object with the following structure, put all identified guidelines (both universal code review guidelines and hidden module constraints) under the "best_practices" field (array of objects):
 
 ```json
 {{
@@ -143,8 +147,9 @@ Follow these steps:
       "tag": "code/proto/tidb_integration",
       "guidelines": "[Hidden Constraint in TiDB integration] The TiDB integration module requires all varchar fields to have explicit length limits due to internal storage constraints. Using unlimited varchar will cause silent data truncation.",
       "confidence": "high|medium",
-      "evidence": "Reviewer pointed out that the new field needs a length limit to avoid data loss issues seen in previous incidents."
-    }}
+      "evidence": "breezewish pointed out that the new field needs a length limit to avoid data loss issues seen in previous incidents."
+    }},
+    ...
   ],
   "search_guide": {{
     "pr_types": ["Protocol buffer field deprecation", "Protobuf schema changes"],
@@ -155,18 +160,20 @@ Follow these steps:
 
 5. For each guideline, verify:
 
-   For Universal Guidelines:
+  Source quality:
+   - Is this guideline derived from reviewer comments that were accepted and acted upon? (higher confidence)
+   - Does it capture the reasoning provided by experienced reviewers rather than surface-level observations?
+
+  For Universal Guidelines:
    - Is this guideline clear and actionable?
    - Can it be applied consistently across different projects?
-   - Does it help prevent common issues?
    - Is it specific enough to be useful but general enough to be widely applicable?
+   - MOST IMPORTANTLY: Does it provide insight that wouldn't be obvious to an intermediate developer?
 
   For hidden constraints, make sure to:
-   - Clearly identify the specific module or functionality
-   - Describes the constraint in specific technical terms, not vague warnings
-   - Explains the potential consequences of violating this constraint (e.g., performance degradation, data corruption, security vulnerability)
-   - Provides context on why this constraint exists (technical limitations, architectural decisions, backward compatibility requirements)
-   - Includes any known workarounds or proper handling approaches
+   - Precisely describes the constraint with technical specificity
+   - Details consequences, reasons, and workarounds
+   - INCLUDES SPECIFICS: Provides concrete thresholds, conditions, or scenarios where the constraint becomes critical
 
 The goal is to build a knowledge base that captures both standard good practices and those critical hidden constraints that experienced developers know but aren't obvious to newcomers.
 """
