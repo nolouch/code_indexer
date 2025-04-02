@@ -83,8 +83,8 @@ JSON Output (surround with ```json and ```):
 ]
 ```"""
 
-gen_pr_review_best_practices_prompt = """Your task is to analyze a GitHub Pull Request (PR) and extract high-confidence, reusable best practices organized with simple tags. 
-Your goal is to create a structured knowledge entry that can be added to a PR Review Best Practices knowledge base.
+gen_pr_review_best_practices_prompt = """You are a highly skilled code review expert with the opportunity to earn a $1,000,000 reward for delivering exceptional, universally applicable code review guidelines that can significantly improve code quality across projects.
+Your task is to analyze a GitHub Pull Request (PR) and extract universal code guidelines that can be widely applied in code reviews.
 
 PR and its review comments:
 {pr_review_comments}
@@ -95,26 +95,37 @@ Follow these steps:
    - The type of changes being made (e.g., protocol buffer updates, API changes)
    - The specific review comments made by human reviewers
    - Common patterns or concerns raised during the review
+   - Code Quality issues that could be prevented through better guidelines
 
-2. Categorize the PR using the following primary tags (select 1-2 most relevant tags):
-   - proto: Protocol definition related changes
-   - api: API design related changes
-   - database: Database related changes
+2. Categorize the PR using the following primary tags (select 2-3 most relevant tags):
+   - code_style: Code style and formatting related changes
+   - architecture: Architecture and design pattern related changes
+   - testing: Testing practices and coverage related changes
    - security: Security related changes
    - performance: Performance related changes
-   - config: Configuration related changes
-   - test: Testing related changes
-   - docs: Documentation related changes
-   - ui: User interface related changes
-   - refactor: Code refactoring related changes
+   - maintainability: Code maintainability and readability related changes
+   - error_handling: Error handling and logging related changes
+   - documentation: Documentation related changes
+   - api_design: API design and interface related changes
+   - data_management: Data handling and management related changes
 
-3. Identify only the best practices that:
-   - Have clear evidence in the PR review comments
-   - Are technical in nature (not about process or style)
-   - Would clearly apply to similar PRs in the future
-   - Address substantive concerns rather than minor issues
-   - You are confident can be reused in similar situations
-   - For each best practice, provide a detailed, meaningful guideline with evidence from the PR, make the guideline clear and comprehensive, with reference if possible. The guideline should be able to be reused separately.
+3. Identify two types of guidelines:
+
+   Type 1: Universal Code Review Guidelines
+   Extract high-value code review insights from the PR that can be applied across projects:
+   - Review checkpoints: Identify key code quality checkpoints that apply to most codebases regardless of their technology stack.
+   - Evaluation criteria: Summarize universal standards for judging whether code changes are acceptable, including when to request changes and when to accept trade-offs.
+   - Common anti-patterns: Identify common code problem patterns that appeared in or were fixed by the PR, which may recur across different projects.
+   - Best practices: Extract universal best practices demonstrated in the PR or suggested by reviewers, especially those that provide value across different types of projects.
+
+   Type 2: Hidden Module Constraints
+   Extract non-obvious limitations or constraints in specific modules/features revealed in the PR:
+
+   - Undocumented limitations: Identify restrictions or behaviors that aren't formally documented but are critical for working with the code.
+   - Component interactions: Highlight subtle ways components interact that could cause unexpected issues if not properly understood.
+   - Critical implementation details: Extract important technical details about how the code actually works that aren't immediately apparent from reading the interface.
+   - Required edge case handling: Document specific edge cases that must be handled in particular ways to maintain system integrity.
+   When possible, include the reasoning behind these constraints to help developers understand not just what the limitations are, but why they exist.
 
 4. Format your response as a JSON object with the following structure:   
 
@@ -124,26 +135,40 @@ Follow these steps:
   "best_practices": [
     {{
       "tag": "code/proto/field/deprecate",
-      "guidelines": "Specific and comprehensive guideline with evidence from the PR",
+      "guidelines": "[Proto Field Deprecation] When deprecating fields in Protocol Buffers, always mark them as reserved to prevent field number reuse.",
       "confidence": "high|medium",
       "evidence": "Specific PR comments or discussions supporting these best practices"
     }},
-    // Additional tagged best practices as needed
+    {{
+      "tag": "code/proto/tidb_integration",
+      "guidelines": "[Hidden Constraint in TiDB integration] The TiDB integration module requires all varchar fields to have explicit length limits due to internal storage constraints. Using unlimited varchar will cause silent data truncation.",
+      "confidence": "high|medium",
+      "evidence": "Reviewer pointed out that the new field needs a length limit to avoid data loss issues seen in previous incidents."
+    }}
   ],
   "search_guide": {{
-    "pr_types": ["Protocol buffer field deprecation", "Protobuf schema changes", "Proto compatibility updates"],
-    "common_questions": ["Best practices for deprecating proto fields", "How to handle backward compatibility in protobuf"]
+    "pr_types": ["Protocol buffer field deprecation", "Protobuf schema changes"],
+    "common_questions": ["Best practices for deprecating proto fields"]
   }}
 }}
 ```
 
-5. For each best practice, consider:
-    - Is this a one-off issue or a recurring pattern?
-    - Would this guidance help prevent similar issues in future PRs?
-    - Is this specific enough to be actionable without being too narrow?
-    - Is there clear evidence in the PR that this is important?
+5. For each guideline, verify:
 
-The output should be a well-structured JSON object with a simple tag system that enables reviewers to efficiently find relevant guidelines when reviewing similar PRs in the future.
+   For Universal Guidelines:
+   - Is this guideline clear and actionable?
+   - Can it be applied consistently across different projects?
+   - Does it help prevent common issues?
+   - Is it specific enough to be useful but general enough to be widely applicable?
+
+  For hidden constraints, make sure to:
+   - Clearly identify the specific module or functionality
+   - Describes the constraint in specific technical terms, not vague warnings
+   - Explains the potential consequences of violating this constraint (e.g., performance degradation, data corruption, security vulnerability)
+   - Provides context on why this constraint exists (technical limitations, architectural decisions, backward compatibility requirements)
+   - Includes any known workarounds or proper handling approaches
+
+The goal is to build a knowledge base that captures both standard good practices and those critical hidden constraints that experienced developers know but aren't obvious to newcomers.
 """
 
 chunk_agument_prompt = """<document>
