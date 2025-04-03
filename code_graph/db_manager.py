@@ -44,6 +44,7 @@ class GraphDBManager:
                 self.available = False
         else:
             logger.warning("Database support is not available - operating in JSON-only mode")
+        logger.info("db manager init finished")
     
     def _setup_tables(self):
         """Create tables if they don't exist."""
