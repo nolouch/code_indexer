@@ -10,7 +10,7 @@ from pathlib import Path
 import networkx as nx
 
 from setting.base import DATABASE_URI
-from semantic_graph.db_manager import GraphDBManager
+from code_graph.db_manager import GraphDBManager
 from parsers.go.parser import GoParser
 
 # Configure logging
@@ -376,7 +376,7 @@ class CodeIndexer:
         # Only initialize the database manager if not disabled and URI is provided
         if not disable_db and db_uri is not None:
             try:
-                from semantic_graph.db_manager import GraphDBManager
+                from code_graph.db_manager import GraphDBManager
                 self.db_manager = GraphDBManager(db_url=db_uri)
                 logger.info(f"Connected to database with URI: {db_uri}")
             except Exception as e:

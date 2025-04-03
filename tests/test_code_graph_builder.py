@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import Mock, patch
-from semantic_graph.builder import SemanticGraphBuilder
+from code_graph.builder import SemanticGraphBuilder
 from core.models import Module, Function, Class, Interface
 
 class TestSemanticGraphBuilder(unittest.TestCase):
