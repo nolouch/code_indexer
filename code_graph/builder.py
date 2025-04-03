@@ -3,23 +3,23 @@ import networkx as nx
 import logging
 from pathlib import Path
 from core.models import CodeRepository, Module, CodeElement
-from .embedders.code import CodeEmbedder
-from .embedders.doc import DocEmbedder
+from .embedders import create_embedder
 
 logger = logging.getLogger(__name__)
 
 class SemanticGraphBuilder:
     """Builds semantic graphs from code analysis results"""
     
-    def __init__(self, code_embedder: CodeEmbedder, doc_embedder: DocEmbedder):
+    def __init__(self, code_embedder=None, doc_embedder=None):
         """Initialize builder with embedders.
         
         Args:
-            code_embedder: Code embedder
-            doc_embedder: Documentation embedder
+            code_embedder: Code embedder, will create default if None
+            doc_embedder: Documentation embedder, will create default if None
         """
-        self.code_embedder = code_embedder
-        self.doc_embedder = doc_embedder
+        # Use the factory to create appropriate embedders based on configuration
+        self.code_embedder = code_embedder or create_embedder("code")
+        self.doc_embedder = doc_embedder or create_embedder("doc")
         
     def build_from_repository(self, code_repo: CodeRepository) -> nx.DiGraph:
         """Build semantic graph from a code repository.
