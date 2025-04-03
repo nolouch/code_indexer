@@ -2,7 +2,6 @@ import numpy as np
 from typing import List, Dict, Any
 import networkx as nx
 from sentence_transformers import SentenceTransformer
-from ..semantic_graph.builder import SemanticGraphBuilder
 from setting.embedding import EMBEDDING_MODEL
 
 class SemanticRetriever:

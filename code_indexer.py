@@ -14,6 +14,9 @@ from setting.base import DATABASE_URI
 from setting.embedding import EMBEDDING_MODEL
 from code_graph.db_manager import GraphDBManager
 from parsers.go.parser import GoParser
+from code_graph.builder import SemanticGraphBuilder
+from code_graph.embedders.code import CodeEmbedder
+from code_graph.embedders.doc import DocEmbedder
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -384,9 +387,12 @@ class CodeIndexer:
                 logger.error(f"Failed to connect to database: {e}")
                 self.disable_db = True
             
-        self.embedder = SimpleEmbedder(embedding_dim)
-        # Initialize an empty graph
-        self.semantic_graph = nx.DiGraph()
+        # Initialize embedders
+        self.code_embedder = CodeEmbedder(embedding_dim)
+        self.doc_embedder = DocEmbedder(embedding_dim)
+        
+        # Initialize graph builder
+        self.graph_builder = SemanticGraphBuilder(self.code_embedder, self.doc_embedder)
         
     def index_repository(self, codebase_path):
         """Index a repository, analyzing its code and creating a semantic graph.
@@ -438,9 +444,9 @@ class CodeIndexer:
                     
                 logger.info(f"Successfully parsed repository with {len(code_repo.modules)} modules")
                 
-                # Convert to semantic graph
+                # Convert to semantic graph using the builder
                 logger.info("Converting to semantic graph...")
-                semantic_graph = self._convert_to_semantic_graph(code_repo)
+                semantic_graph = self.graph_builder.build_from_repository(code_repo)
             else:
                 # For other parsers that might use a different method
                 raise ValueError(f"Parsing for language {language} is not implemented")
@@ -449,21 +455,6 @@ class CodeIndexer:
             # Get more detailed error info
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
-            
-            # Debug info
-            if code_repo is not None:
-                logger.debug(f"code_repo type: {type(code_repo)}")
-                logger.debug(f"code_repo attributes: {dir(code_repo)}")
-                if hasattr(code_repo, 'modules'):
-                    for module_name, module in code_repo.modules.items():
-                        logger.debug(f"module '{module_name}' type: {type(module)}")
-                        if module is None:
-                            logger.debug(f"module '{module_name}' is None")
-                        elif isinstance(module, str):
-                            logger.debug(f"module '{module_name}' is a string: {module}")
-                        else:
-                            logger.debug(f"module '{module_name}' attributes: {dir(module)}")
-            
             return repository
         
         if not semantic_graph or not semantic_graph.nodes():
@@ -471,13 +462,6 @@ class CodeIndexer:
             return repository
         
         logger.info(f"Created semantic graph with {len(semantic_graph.nodes())} nodes and {len(semantic_graph.edges())} edges")
-        
-        # Add embeddings to nodes if needed
-        if self.embedder:
-            for node_id, node_data in semantic_graph.nodes(data=True):
-                content = node_data.get('content', '')
-                if content:
-                    node_data['embedding'] = self.embedder.embed(content)
         
         # Store the semantic graph in the repository
         repository.semantic_graph = semantic_graph

@@ -2,7 +2,7 @@
 
 # Embedding model configuration
 EMBEDDING_MODEL = {
-    "name": "all-MiniLM-L6-v2",  # Use MiniLM as default since it's more stable
+    "name": "all-MiniLM-L6-v2",  # Use MiniLM model which is more stable
     "dimension": 384,            # MiniLM dimension
 }
 

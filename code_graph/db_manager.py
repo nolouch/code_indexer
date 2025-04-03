@@ -30,6 +30,10 @@ class GraphDBManager:
         self.db_url = db_url or DATABASE_URI
         self.available = self.db_url is not None and engine is not None
         
+        # Set embedding dimensions from settings
+        self.CODE_EMBEDDING_DIM = CODE_EMBEDDING_DIM
+        self.DOC_EMBEDDING_DIM = DOC_EMBEDDING_DIM
+        
         if self.available:
             logger.info(f"Database support is available with URL: {self.db_url}")
             # Create the tables if they don't exist yet
