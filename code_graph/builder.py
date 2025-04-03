@@ -49,7 +49,7 @@ class SemanticGraphBuilder:
                 logger.warning(f"Module {module_name} is None, skipping")
                 continue
 
-            logger.debug(f"Processing module: name={module_name}, type={type(module)}")
+            logger.info(f"Processing module: name={module_name}, type={type(module)}")
                 
             module_id = f"module:{module_name}"
             node_id = module_id  # Use the same ID format for the node_id field
@@ -73,7 +73,7 @@ class SemanticGraphBuilder:
                 logger.warning(f"Module {module_name} has no functions attribute")
                 continue
                 
-            logger.debug(f"Processing functions for module {module_name}: count={len(module.functions)}")
+            logger.info(f"Processing functions for module {module_name}: count={len(module.functions)}")
             for func in module.functions:
                 try:
                     func_name = func.name
@@ -115,7 +115,7 @@ class SemanticGraphBuilder:
                 logger.warning(f"Module {module_name} has no classes attribute")
                 continue
                 
-            logger.debug(f"Processing classes for module {module_name}: count={len(module.classes)}")
+            logger.info(f"Processing classes for module {module_name}: count={len(module.classes)}")
             for cls in module.classes:
                 try:
                     class_name = cls.name
@@ -150,7 +150,7 @@ class SemanticGraphBuilder:
                         logger.warning(f"Methods attribute of class {class_name} is not a list: {type(cls.methods)}")
                         continue
                         
-                    logger.debug(f"Processing methods for class {class_name}: count={len(cls.methods)}")
+                    logger.info(f"Processing methods for class {class_name}: count={len(cls.methods)}")
                     for method in cls.methods:
                         try:
                             method_name = method.name

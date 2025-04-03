@@ -449,10 +449,29 @@ class GraphDBManager:
             logger.error(f"Error loading graph for repository {repo_path}: {e}")
             return None
 
-    def vector_search(self, repo_path: str, query: str, limit: int = VECTOR_SEARCH["default_limit"], use_doc_embedding: bool = False) -> List[Dict[str, Any]]:
-        """Perform a vector search using the query string."""
+    def vector_search(self, repo_name: str, query: str = None, 
+                     limit: int = VECTOR_SEARCH["default_limit"], use_doc_embedding: bool = False) -> List[Dict[str, Any]]:
+        """Perform a vector search using the query string.
+        
+        Args:
+            repo_name: Repository name
+            query: Search query string
+            limit: Maximum number of results to return
+            use_doc_embedding: Whether to use document embeddings instead of code embeddings
+            
+        Returns:
+            List of matching nodes with their data
+        """
         if not self.available:
             logger.warning("Cannot perform vector search - database is not available")
+            return []
+        
+        if not query:
+            logger.warning("Cannot perform vector search - query string is empty")
+            return []
+            
+        if not repo_name:
+            logger.warning("Cannot perform vector search - repository name not provided")
             return []
         
         # Generate embedding for the query
@@ -462,15 +481,11 @@ class GraphDBManager:
             model = SentenceTransformer(EMBEDDING_MODEL["name"])
             query_embedding = model.encode(query)
             
-            # Convert to absolute path
-            abs_path = str(Path(repo_path).resolve())
-            
-            # Perform semantic search with the generated embedding
+            # Find repository by name
             with SessionLocal() as session:
-                # Get repository
-                repo = session.query(Repository).filter(Repository.path == abs_path).first()
+                repo = session.query(Repository).filter(Repository.name == repo_name).first()
                 if not repo:
-                    logger.warning(f"Repository not found in database: {repo_path}")
+                    logger.warning(f"Repository not found by name: {repo_name}")
                     return []
                 
                 # Determine which embedding to use
@@ -566,15 +581,34 @@ class GraphDBManager:
             
         return repo
 
-    def get_repository_stats(self, repository_path: str) -> Dict[str, Any]:
-        """Get statistics about the stored graph"""
-        # Convert to absolute path
-        abs_path = str(Path(repository_path).resolve())
+    def get_repository_stats(self, repository_name: str, repository_path: str = None) -> Dict[str, Any]:
+        """Get statistics about the stored graph.
         
+        Args:
+            repository_name: Name of the repository
+            repository_path: Deprecated, kept for backward compatibility
+            
+        Returns:
+            Dictionary of repository statistics
+        """
+        if not repository_name:
+            if repository_path:
+                # Try to extract name from path for backward compatibility
+                try:
+                    repository_name = Path(repository_path).name
+                except:
+                    logger.warning("Cannot extract repository name from path")
+                    return {}
+            else:
+                logger.warning("Cannot get repository stats - repository name not provided")
+                return {}
+            
         with SessionLocal() as session:
-            # Get repository info
-            repo = session.query(Repository).filter(Repository.path == abs_path).first()
+            # Get repository by name
+            repo = session.query(Repository).filter(Repository.name == repository_name).first()
+                
             if not repo:
+                logger.warning(f"Repository not found by name: {repository_name}")
                 return {}
             
             # Get node type counts

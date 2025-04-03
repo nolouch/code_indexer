@@ -159,7 +159,7 @@ async def query_best_practices(request: QueryRequest):
 # --- Code Graph Models and Endpoints ---
 class CodeSearchRequest(BaseModel):
     query: str = Field(..., description="The code search query")
-    repository_path: str = Field(..., description="Path to the code repository")
+    repository_name: str = Field(..., description="Name of the repository")
     limit: Optional[int] = Field(10, description="Maximum number of results to return")
     use_doc_embedding: Optional[bool] = Field(False, description="Whether to search using documentation embeddings instead of code embeddings")
 
@@ -171,7 +171,8 @@ class CodeNode(BaseModel):
     file_path: str = Field(..., description="File path containing this node")
     line: int = Field(..., description="Line number in the file")
     similarity: float = Field(..., description="Similarity score to the query")
-    docstring: Optional[str] = Field(None, description="Documentation string if available")
+    code_content: Optional[str] = Field(None, description="The actual code content of this node")
+    doc_content: Optional[str] = Field(None, description="Documentation content for this node")
 
 
 class CodeSearchResponse(BaseModel):
@@ -186,7 +187,7 @@ async def search_code_graph(request: CodeSearchRequest):
     This endpoint performs a vector search to find semantically similar code elements.
     
     - **query**: The search query text
-    - **repository_path**: Path to the code repository to search in
+    - **repository_name**: Name of the repository
     - **limit**: Maximum number of results to return (default: 10)
     - **use_doc_embedding**: Whether to search using documentation embeddings instead of code embeddings
     
@@ -198,9 +199,12 @@ async def search_code_graph(request: CodeSearchRequest):
         raise HTTPException(status_code=503, detail="Code graph database not initialized or unavailable")
 
     try:
-        logger.info(f"Executing code search: {request.query}, repository: {request.repository_path}")
+        # Use repository name directly in the search
+        logger.info(f"Executing code search: {request.query}, repository name: {request.repository_name}")
+        
+        # Execute the search with repository name
         results = code_graph_db.vector_search(
-            repo_path=request.repository_path,
+            repo_name=request.repository_name,
             query=request.query,
             limit=request.limit,
             use_doc_embedding=request.use_doc_embedding
@@ -209,8 +213,13 @@ async def search_code_graph(request: CodeSearchRequest):
         # Convert the results to the response model format
         nodes = []
         for result in results:
-            # Extract docstring if available
-            docstring = result.get("docstring", None)
+            # Extract content and documentation
+            code_content = result.get("code_context", None)
+            doc_content = result.get("doc_context", None)
+            
+            # Fall back to docstring if doc_context is not available
+            if doc_content is None:
+                doc_content = result.get("docstring", None)
             
             node = CodeNode(
                 id=result["id"],
@@ -219,7 +228,8 @@ async def search_code_graph(request: CodeSearchRequest):
                 file_path=result["file_path"],
                 line=result["line"],
                 similarity=result["similarity"],
-                docstring=docstring
+                code_content=code_content,
+                doc_content=doc_content
             )
             nodes.append(node)
         
@@ -231,33 +241,59 @@ async def search_code_graph(request: CodeSearchRequest):
         raise HTTPException(status_code=500, detail=f"Error searching code graph: {str(e)}")
 
 
-@app.get("/code_graph/repositories/{repository_path}/stats", tags=["Code Graph"])
-async def get_repository_stats(repository_path: str = Path(..., description="Path to the code repository")):
+@app.get("/code_graph/repositories/stats", tags=["Code Graph"])
+async def get_repository_stats(
+    repository_name: str = Query(..., description="Name of the code repository")
+):
     """
     Get statistics about a code repository stored in the graph database.
     
     This endpoint returns information about the nodes and relationships in the repository.
+    
+    - **repository_name**: Name of the code repository
+    
+    Returns:
+        Statistics about the repository graph, including node and edge counts.
+    """
+    if not code_graph_db or not code_graph_db.available:
+        logger.error("Code graph database not initialized or unavailable, cannot get repository stats")
+        raise HTTPException(status_code=503, detail="Code graph database not initialized or unavailable")
+
+    try:
+        logger.info(f"Getting repository stats by name: {repository_name}")
+        
+        stats = code_graph_db.get_repository_stats(
+            repository_name=repository_name
+        )
+        if not stats:
+            logger.warning(f"Repository not found: {repository_name}")
+            raise HTTPException(status_code=404, detail=f"Repository not found: {repository_name}")
+        return stats
+    except Exception as e:
+        logger.error(f"Error getting repository stats: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Error retrieving repository stats: {str(e)}")
+
+
+# Keep the original endpoint for backward compatibility
+@app.get("/code_graph/repositories/{repository_path}/stats", tags=["Code Graph"], deprecated=True)
+async def get_repository_stats_by_path(repository_path: str = Path(..., description="Path to the code repository")):
+    """
+    Get statistics about a code repository stored in the graph database, identified by path.
+    
+    This endpoint is deprecated. Use /code_graph/repositories/stats instead.
     
     - **repository_path**: Path to the code repository
     
     Returns:
         Statistics about the repository graph, including node and edge counts.
     """
-    if not code_graph_db or not code_graph_db.available:
-        logger.error(f"Code graph database not initialized or unavailable, cannot get repository stats: {repository_path}")
-        raise HTTPException(status_code=503, detail="Code graph database not initialized or unavailable")
-
-    try:
-        logger.info(f"Getting repository stats: {repository_path}")
-        stats = code_graph_db.get_repository_stats(repository_path)
-        if not stats:
-            logger.warning(f"Repository not found: {repository_path}")
-            raise HTTPException(status_code=404, detail=f"Repository not found: {repository_path}")
-        return stats
-    except Exception as e:
-        logger.error(f"Error getting repository stats for '{repository_path}': {e}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Error retrieving repository stats: {str(e)}")
+    # Extract repository name from path (last part of the path)
+    from pathlib import Path as PathLib
+    repo_name = PathLib(repository_path).name
+    
+    # Use the repository name to get stats
+    return await get_repository_stats(repository_name=repo_name)
 
 
 class RepositoryRequest(BaseModel):
@@ -352,3 +388,30 @@ async def check_database():
             "message": f"Database connection failed: {str(e)}",
             "database_uri": DATABASE_URI.replace(DATABASE_URI.split("@")[0], "***") if "@" in DATABASE_URI else "***"
         }
+
+# API usage examples
+"""
+# Curl examples for the API endpoints
+
+# Search code in a repository by name
+curl -X POST "http://localhost:8000/code_graph/search" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "implement transaction",
+    "repository_name": "tidb",
+    "limit": 5,
+    "use_doc_embedding": false
+  }'
+
+# Get repository statistics by name
+curl -X GET "http://localhost:8000/code_graph/repositories/stats?repository_name=tidb"
+
+# List all repositories
+curl -X GET "http://localhost:8000/code_graph/repositories"
+
+# Check database connection
+curl -X GET "http://localhost:8000/db_check"
+
+# Check API status
+curl -X GET "http://localhost:8000/"
+"""

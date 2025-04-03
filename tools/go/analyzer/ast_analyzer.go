@@ -27,14 +27,14 @@ type FunctionInfo struct {
 }
 
 type StructInfo struct {
-	Name      string      `json:"name"`
-	Package   string      `json:"package"`
-	File      string      `json:"file"`
-	Line      int         `json:"line"`
-	DocString string      `json:"docstring,omitempty"`
-	Fields    []FieldInfo `json:"fields"`
-	Methods   []string    `json:"methods"`
-	Context   string      `json:"context"`
+	Name      string         `json:"name"`
+	Package   string         `json:"package"`
+	File      string         `json:"file"`
+	Line      int            `json:"line"`
+	DocString string         `json:"docstring,omitempty"`
+	Fields    []FieldInfo    `json:"fields"`
+	Methods   []FunctionInfo `json:"methods"`
+	Context   string         `json:"context"`
 }
 
 type FieldInfo struct {
@@ -144,7 +144,7 @@ func main() {
 		}
 
 		// Map to track method receivers for organizing methods with their structs
-		structMethods := make(map[string][]string)
+		structMethods := make(map[string][]FunctionInfo)
 
 		// Analyze package contents
 		for _, f := range pkg.Syntax {
@@ -168,7 +168,7 @@ func main() {
 						}
 
 						if receiverType != "" {
-							structMethods[receiverType] = append(structMethods[receiverType], node.Name.Name)
+							structMethods[receiverType] = append(structMethods[receiverType], fInfo)
 						}
 					}
 
@@ -187,7 +187,7 @@ func main() {
 			})
 		}
 
-		// Add method information to each struct
+		// Associate methods with structs
 		for i, structInfo := range pkgInfo.Structs {
 			if methods, ok := structMethods[structInfo.Name]; ok {
 				pkgInfo.Structs[i].Methods = methods
@@ -275,7 +275,7 @@ func processGoFile(filePath string, pkgInfo *PackageInfo) {
 	}
 
 	// Map to track method receivers
-	structMethods := make(map[string][]string)
+	structMethods := make(map[string][]FunctionInfo)
 
 	// Extract imports
 	for _, imp := range node.Imports {
@@ -319,7 +319,7 @@ func processGoFile(filePath string, pkgInfo *PackageInfo) {
 
 				// Add to method map for later struct association
 				if receiverType != "" {
-					structMethods[receiverType] = append(structMethods[receiverType], d.Name.Name)
+					structMethods[receiverType] = append(structMethods[receiverType], fInfo)
 				}
 			}
 

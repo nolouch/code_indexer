@@ -298,7 +298,7 @@ class GoParser(LanguageParser):
             # Set GO111MODULE to "on" to ensure module-aware mode
             env["GO111MODULE"] = "on"
             
-            logger.debug(f"Running command: {' '.join(cmd)}")
+            logger.info(f"Running command: {' '.join(cmd)}")
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -483,7 +483,7 @@ class GoParser(LanguageParser):
                         # Check what type of method data we have
                         if isinstance(method_item, str):
                             # Just a method name, create a minimal Function
-                            logger.debug(f"Got method name as string: {method_item}")
+                            logger.info(f"Got method name as string: {method_item}")
                             method_func = Function(
                                 name=method_item,
                                 element_type="method",
