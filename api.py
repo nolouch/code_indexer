@@ -28,7 +28,7 @@ try:
     logger.info("Checking database configuration...")
     if DATABASE_URI:
         logger.info(f"Using database URI: {DATABASE_URI}")
-        
+
         # Create tables if they don't exist
         if engine is not None:
             try:
@@ -59,9 +59,10 @@ try:
     if llm_client is not None:
         # Embedding function
         try:
+
             def embedding_func(text: str) -> np.ndarray:
                 return get_text_embedding(text, "text-embedding-3-small")
-                
+
             logger.info("Initializing best practices knowledge base...")
             bp_kb = BestPracticesKnowledgeBase(llm_client, embedding_func)
             logger.info("Knowledge base initialized successfully")
@@ -70,7 +71,9 @@ try:
             logger.error(traceback.format_exc())
             bp_kb = None
     else:
-        logger.warning("Skipping knowledge base initialization due to missing LLM client")
+        logger.warning(
+            "Skipping knowledge base initialization due to missing LLM client"
+        )
         bp_kb = None
 
     # Initialize Code Graph database manager
@@ -94,10 +97,17 @@ app = FastAPI(
     description="API to query code knowledge base and best practices",
     version="0.1.0",
     openapi_tags=[
-        {"name": "Best Practices", "description": "Operations related to best practices knowledge base"},
-        {"name": "Code Graph", "description": "Operations related to code graph analysis and search"}
-    ]
+        {
+            "name": "Best Practices",
+            "description": "Operations related to best practices knowledge base",
+        },
+        {
+            "name": "Code Graph",
+            "description": "Operations related to code graph analysis and search",
+        },
+    ],
 )
+
 
 # Root path handler, shows initialization status
 @app.get("/", tags=["Status"])
@@ -105,19 +115,22 @@ async def root():
     """Get API status and availability information"""
     db_status = {
         "initialized": code_graph_db is not None,
-        "available": code_graph_db is not None and code_graph_db.available if code_graph_db else False,
-        "uri_configured": DATABASE_URI is not None and len(DATABASE_URI) > 0
+        "available": code_graph_db is not None and code_graph_db.available
+        if code_graph_db
+        else False,
+        "uri_configured": DATABASE_URI is not None and len(DATABASE_URI) > 0,
     }
-    
+
     return {
         "status": "running",
         "services": {
             "llm_client": llm_client is not None,
             "best_practices_kb": bp_kb is not None,
-            "code_graph_db": db_status
+            "code_graph_db": db_status,
         },
-        "docs": "/docs"
+        "docs": "/docs",
     }
+
 
 # --- Best Practices Models and Endpoints ---
 class QueryRequest(BaseModel):
@@ -128,32 +141,48 @@ class QueryResponse(BaseModel):
     results: dict = Field(..., description="The search results")
 
 
-@app.post("/best_practices", response_model=QueryResponse, tags=["Best Practices"])
-async def query_best_practices(request: QueryRequest):
+@app.get("/best_practices", response_model=QueryResponse, tags=["Best Practices"])
+async def query_best_practices(
+    query: str = Query(..., description="The search query for best practices"),
+    top_k: Optional[int] = Query(default=10, description="Top K results to return"),
+    threshold: Optional[float] = Query(
+        default=0.5, description="Similarity score threshold"
+    ),
+):
     """
     Accepts a query string and returns relevant best practices from the knowledge base.
-    
+
     This endpoint finds best practices that match the query semantically.
-    
+
+    Args:
+        query: The search query string
+        top_k: Top K results to return (optional)
+        threshold: Similarity score threshold (optional)
+
     Returns:
         A dictionary of best practices relevant to the query.
     """
     if llm_client is None:
-        raise HTTPException(status_code=503, detail="LLM client not initialized - AWS credentials may be missing")
-        
+        raise HTTPException(
+            status_code=503,
+            detail="LLM client not initialized - AWS credentials may be missing",
+        )
+
     if bp_kb is None:
         raise HTTPException(status_code=503, detail="Knowledge base not initialized")
 
     try:
-        practices = bp_kb.find_best_practices(request.query)
-        # Ensure the results are serializable (e.g., list of strings or dicts)
-        # You might need to adapt this based on the actual return type of find_best_practices
+        practices = bp_kb.find_best_practices(
+            query=query,
+            top_k=top_k,
+        )
         return QueryResponse(results=practices)
     except Exception as e:
-        # Log the exception for debugging
-        logger.error(f"Error processing query '{request.query}': {e}")
+        logger.error(f"Error processing query '{query}': {e}")
         logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Error querying best practices: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error querying best practices: {str(e)}"
+        )
 
 
 # --- Code Graph Models and Endpoints ---
@@ -161,7 +190,10 @@ class CodeSearchRequest(BaseModel):
     query: str = Field(..., description="The code search query")
     repository_path: str = Field(..., description="Path to the code repository")
     limit: Optional[int] = Field(10, description="Maximum number of results to return")
-    use_doc_embedding: Optional[bool] = Field(False, description="Whether to search using documentation embeddings instead of code embeddings")
+    use_doc_embedding: Optional[bool] = Field(
+        False,
+        description="Whether to search using documentation embeddings instead of code embeddings",
+    )
 
 
 class CodeNode(BaseModel):
@@ -171,47 +203,57 @@ class CodeNode(BaseModel):
     file_path: str = Field(..., description="File path containing this node")
     line: int = Field(..., description="Line number in the file")
     similarity: float = Field(..., description="Similarity score to the query")
-    docstring: Optional[str] = Field(None, description="Documentation string if available")
+    docstring: Optional[str] = Field(
+        None, description="Documentation string if available"
+    )
 
 
 class CodeSearchResponse(BaseModel):
-    results: List[CodeNode] = Field(..., description="List of code nodes matching the query")
+    results: List[CodeNode] = Field(
+        ..., description="List of code nodes matching the query"
+    )
 
 
 @app.post("/code_graph/search", response_model=CodeSearchResponse, tags=["Code Graph"])
 async def search_code_graph(request: CodeSearchRequest):
     """
     Search the code graph for nodes matching the query.
-    
+
     This endpoint performs a vector search to find semantically similar code elements.
-    
+
     - **query**: The search query text
     - **repository_path**: Path to the code repository to search in
     - **limit**: Maximum number of results to return (default: 10)
     - **use_doc_embedding**: Whether to search using documentation embeddings instead of code embeddings
-    
+
     Returns:
         A list of code nodes matching the query, ordered by relevance.
     """
     if not code_graph_db or not code_graph_db.available:
-        logger.error(f"Code graph database not initialized or unavailable, cannot execute search query: {request.query}")
-        raise HTTPException(status_code=503, detail="Code graph database not initialized or unavailable")
+        logger.error(
+            f"Code graph database not initialized or unavailable, cannot execute search query: {request.query}"
+        )
+        raise HTTPException(
+            status_code=503, detail="Code graph database not initialized or unavailable"
+        )
 
     try:
-        logger.info(f"Executing code search: {request.query}, repository: {request.repository_path}")
+        logger.info(
+            f"Executing code search: {request.query}, repository: {request.repository_path}"
+        )
         results = code_graph_db.vector_search(
             repo_path=request.repository_path,
             query=request.query,
             limit=request.limit,
-            use_doc_embedding=request.use_doc_embedding
+            use_doc_embedding=request.use_doc_embedding,
         )
-        
+
         # Convert the results to the response model format
         nodes = []
         for result in results:
             # Extract docstring if available
             docstring = result.get("docstring", None)
-            
+
             node = CodeNode(
                 id=result["id"],
                 name=result["name"],
@@ -219,45 +261,57 @@ async def search_code_graph(request: CodeSearchRequest):
                 file_path=result["file_path"],
                 line=result["line"],
                 similarity=result["similarity"],
-                docstring=docstring
+                docstring=docstring,
             )
             nodes.append(node)
-        
+
         logger.info(f"Found {len(nodes)} matching nodes")
         return CodeSearchResponse(results=nodes)
     except Exception as e:
         logger.error(f"Error processing code search query '{request.query}': {e}")
         logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Error searching code graph: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error searching code graph: {str(e)}"
+        )
 
 
 @app.get("/code_graph/repositories/{repository_path}/stats", tags=["Code Graph"])
-async def get_repository_stats(repository_path: str = Path(..., description="Path to the code repository")):
+async def get_repository_stats(
+    repository_path: str = Path(..., description="Path to the code repository")
+):
     """
     Get statistics about a code repository stored in the graph database.
-    
+
     This endpoint returns information about the nodes and relationships in the repository.
-    
+
     - **repository_path**: Path to the code repository
-    
+
     Returns:
         Statistics about the repository graph, including node and edge counts.
     """
     if not code_graph_db or not code_graph_db.available:
-        logger.error(f"Code graph database not initialized or unavailable, cannot get repository stats: {repository_path}")
-        raise HTTPException(status_code=503, detail="Code graph database not initialized or unavailable")
+        logger.error(
+            f"Code graph database not initialized or unavailable, cannot get repository stats: {repository_path}"
+        )
+        raise HTTPException(
+            status_code=503, detail="Code graph database not initialized or unavailable"
+        )
 
     try:
         logger.info(f"Getting repository stats: {repository_path}")
         stats = code_graph_db.get_repository_stats(repository_path)
         if not stats:
             logger.warning(f"Repository not found: {repository_path}")
-            raise HTTPException(status_code=404, detail=f"Repository not found: {repository_path}")
+            raise HTTPException(
+                status_code=404, detail=f"Repository not found: {repository_path}"
+            )
         return stats
     except Exception as e:
         logger.error(f"Error getting repository stats for '{repository_path}': {e}")
         logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Error retrieving repository stats: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error retrieving repository stats: {str(e)}"
+        )
 
 
 class RepositoryRequest(BaseModel):
@@ -268,33 +322,50 @@ class RepositoryRequest(BaseModel):
 async def list_repositories():
     """
     List all repositories stored in the code graph database.
-    
+
     Returns:
         A list of repository information.
     """
     if not code_graph_db or not code_graph_db.available:
-        logger.error("Code graph database not initialized or unavailable, cannot list repositories")
-        raise HTTPException(status_code=503, detail="Code graph database not initialized or unavailable")
+        logger.error(
+            "Code graph database not initialized or unavailable, cannot list repositories"
+        )
+        raise HTTPException(
+            status_code=503, detail="Code graph database not initialized or unavailable"
+        )
 
     try:
         logger.info("Listing all repositories")
         from code_graph.models import Repository
-        
+
         # Use the imported SessionLocal, not from code_graph_db
         if SessionLocal is None:
             logger.error("SessionLocal is not initialized")
-            raise HTTPException(status_code=503, detail="Database session factory is not initialized")
-            
+            raise HTTPException(
+                status_code=503, detail="Database session factory is not initialized"
+            )
+
         with SessionLocal() as session:
             repos = session.query(Repository).all()
-            return [{"id": repo.id, "name": repo.name, "path": repo.path, 
-                    "language": repo.language, "nodes_count": repo.nodes_count, 
-                    "edges_count": repo.edges_count, "last_indexed": repo.last_indexed} 
-                    for repo in repos]
+            return [
+                {
+                    "id": repo.id,
+                    "name": repo.name,
+                    "path": repo.path,
+                    "language": repo.language,
+                    "nodes_count": repo.nodes_count,
+                    "edges_count": repo.edges_count,
+                    "last_indexed": repo.last_indexed,
+                }
+                for repo in repos
+            ]
     except Exception as e:
         logger.error(f"Error listing repositories: {e}")
         logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Error listing repositories: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error listing repositories: {str(e)}"
+        )
+
 
 @app.get("/db_check", tags=["Status"])
 async def check_database():
@@ -302,38 +373,45 @@ async def check_database():
     if not DATABASE_URI:
         return {
             "status": "error",
-            "message": "DATABASE_URI is not configured in settings"
+            "message": "DATABASE_URI is not configured in settings",
         }
-    
+
     if not code_graph_db:
         return {
             "status": "error",
-            "message": "Code graph database manager not initialized"
+            "message": "Code graph database manager not initialized",
         }
-    
+
     if engine is None:
         return {
             "status": "error",
             "message": "Database engine could not be initialized",
-            "database_uri": DATABASE_URI.replace(DATABASE_URI.split("@")[0], "***") if "@" in DATABASE_URI else "***"
+            "database_uri": DATABASE_URI.replace(DATABASE_URI.split("@")[0], "***")
+            if "@" in DATABASE_URI
+            else "***",
         }
-    
+
     try:
         # Try to create a session and run a simple query
         with SessionLocal() as session:
             # Run simple query
             result = session.execute("SELECT 1").scalar()
-            
+
             # Try to query repositories table if it exists
             try:
                 from code_graph.models import Repository
+
                 repo_count = session.query(Repository).count()
                 return {
                     "status": "ok",
                     "connection": True,
                     "test_query": result == 1,
                     "repositories_count": repo_count,
-                    "database_uri": DATABASE_URI.replace(DATABASE_URI.split("@")[0], "***") if "@" in DATABASE_URI else "***"
+                    "database_uri": DATABASE_URI.replace(
+                        DATABASE_URI.split("@")[0], "***"
+                    )
+                    if "@" in DATABASE_URI
+                    else "***",
                 }
             except Exception as e:
                 # Table might not exist yet
@@ -343,12 +421,18 @@ async def check_database():
                     "test_query": result == 1,
                     "tables_error": str(e),
                     "message": "Database connection works but tables might not be initialized",
-                    "database_uri": DATABASE_URI.replace(DATABASE_URI.split("@")[0], "***") if "@" in DATABASE_URI else "***"
+                    "database_uri": DATABASE_URI.replace(
+                        DATABASE_URI.split("@")[0], "***"
+                    )
+                    if "@" in DATABASE_URI
+                    else "***",
                 }
     except Exception as e:
         return {
             "status": "error",
             "connection": False,
             "message": f"Database connection failed: {str(e)}",
-            "database_uri": DATABASE_URI.replace(DATABASE_URI.split("@")[0], "***") if "@" in DATABASE_URI else "***"
+            "database_uri": DATABASE_URI.replace(DATABASE_URI.split("@")[0], "***")
+            if "@" in DATABASE_URI
+            else "***",
         }
