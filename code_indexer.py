@@ -8,8 +8,10 @@ import numpy as np
 from typing import Dict, List, Optional, Union, Any, Tuple
 from pathlib import Path
 import networkx as nx
+from sentence_transformers import SentenceTransformer
 
 from setting.base import DATABASE_URI
+from setting.embedding import EMBEDDING_MODEL
 from code_graph.db_manager import GraphDBManager
 from parsers.go.parser import GoParser
 
@@ -91,8 +93,7 @@ class Repository:
         
         # Otherwise, try semantic matching if we have embeddings
         try:
-            from sentence_transformers import SentenceTransformer
-            embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+            embedding_model = SentenceTransformer(EMBEDDING_MODEL["name"])
             query_embedding = embedding_model.encode(query)
             
             # Calculate semantic similarity for nodes with embeddings
@@ -314,7 +315,7 @@ class SimpleEmbedder:
         # Try to import sentence-transformers
         try:
             from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer('all-MiniLM-L6-v2')
+            self.model = SentenceTransformer(EMBEDDING_MODEL["name"])
             self.use_model = True
             logger.info("Using SentenceTransformer for embeddings")
         except ImportError:
@@ -490,7 +491,7 @@ class CodeIndexer:
         if not self.disable_db and self.db_manager:
             try:
                 logger.info("Storing semantic graph in database")
-                self.db_manager.store_semantic_graph(str(repo_path), repository.name, semantic_graph)
+                self.db_manager.save_graph(semantic_graph, str(repo_path))
                 logger.info("Successfully stored semantic graph in database")
             except Exception as e:
                 logger.error(f"Failed to store semantic graph in database: {e}")

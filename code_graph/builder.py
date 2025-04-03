@@ -72,11 +72,12 @@ class SemanticGraphBuilder:
             
         # Prioritize using the context field
         file_path = getattr(module, 'file', None)
-        module_context = getattr(module, 'context', '')
+        module_code_context = getattr(module, 'code_context', '')
+        module_doc_context = getattr(module, 'doc_context', '')
         
         # If no context is available, read from file
-        if not module_context and file_path:
-            module_context = self._get_module_content(file_path)
+        if not module_code_context and file_path:
+            module_code_context = self._get_module_content(file_path)
         
         # Add module node
         self.graph.add_node(
@@ -84,7 +85,8 @@ class SemanticGraphBuilder:
             type="module",
             language=module.language,
             file=file_path,
-            code_content=module_context
+            code_context=module_code_context,
+            doc_context=module_doc_context
         )
         
         # Add functions
@@ -92,12 +94,13 @@ class SemanticGraphBuilder:
             func_file = getattr(func, 'file', file_path)
             func_line = getattr(func, 'line', 1)
             
-            # Prioritize using the context field
-            func_context = getattr(func, 'context', '')
+            # Get code and doc context
+            func_code_context = getattr(func, 'code_context', '')
+            func_doc_context = getattr(func, 'docstring', '')
             
-            # If no context is available, try to read from file
-            if not func_context and func_file:
-                func_context = self._get_code_content(func_file, func_line)
+            # If no code context is available, try to read from file
+            if not func_code_context and func_file:
+                func_code_context = self._get_code_content(func_file, func_line)
                 
             self.graph.add_node(
                 f"{module.name}.{func.name}",
@@ -105,8 +108,8 @@ class SemanticGraphBuilder:
                 language=func.language,
                 file=func_file,
                 line=func_line,
-                docstring=getattr(func, 'docstring', ''),
-                code_content=func_context
+                code_context=func_code_context,
+                doc_context=func_doc_context
             )
             self.graph.add_edge(
                 module.name,
@@ -119,12 +122,13 @@ class SemanticGraphBuilder:
             cls_file = getattr(cls, 'file', file_path)
             cls_line = getattr(cls, 'line', 1)
             
-            # Prioritize using the context field
-            cls_context = getattr(cls, 'context', '')
+            # Get code and doc context
+            cls_code_context = getattr(cls, 'code_context', '')
+            cls_doc_context = getattr(cls, 'docstring', '')
             
-            # If no context is available, try to read from file
-            if not cls_context and cls_file:
-                cls_context = self._get_code_content(cls_file, cls_line)
+            # If no code context is available, try to read from file
+            if not cls_code_context and cls_file:
+                cls_code_context = self._get_code_content(cls_file, cls_line)
                 
             self.graph.add_node(
                 f"{module.name}.{cls.name}",
@@ -132,8 +136,8 @@ class SemanticGraphBuilder:
                 language=cls.language,
                 file=cls_file,
                 line=cls_line,
-                docstring=getattr(cls, 'docstring', ''),
-                code_content=cls_context
+                code_context=cls_code_context,
+                doc_context=cls_doc_context
             )
             self.graph.add_edge(
                 module.name,
@@ -146,12 +150,13 @@ class SemanticGraphBuilder:
             iface_file = getattr(iface, 'file', file_path)
             iface_line = getattr(iface, 'line', 1)
             
-            # Prioritize using the context field
-            iface_context = getattr(iface, 'context', '')
+            # Get code and doc context
+            iface_code_context = getattr(iface, 'code_context', '')
+            iface_doc_context = getattr(iface, 'docstring', '')
             
-            # If no context is available, try to read from file
-            if not iface_context and iface_file:
-                iface_context = self._get_code_content(iface_file, iface_line)
+            # If no code context is available, try to read from file
+            if not iface_code_context and iface_file:
+                iface_code_context = self._get_code_content(iface_file, iface_line)
                 
             self.graph.add_node(
                 f"{module.name}.{iface.name}",
@@ -159,8 +164,8 @@ class SemanticGraphBuilder:
                 language=iface.language,
                 file=iface_file,
                 line=iface_line,
-                docstring=getattr(iface, 'docstring', ''),
-                code_content=iface_context
+                code_context=iface_code_context,
+                doc_context=iface_doc_context
             )
             self.graph.add_edge(
                 module.name,
@@ -215,25 +220,25 @@ class SemanticGraphBuilder:
         
         for node, data in nodes_data:
             # Prefer context field if available, otherwise use code_content
-            if "code_content" in data:
-                if not data["code_content"] and data.get("type") != "module":
+            if "code_context" in data:
+                if not data["code_context"] and data.get("type") != "module":
                     # Try to get context from the node's file
                     try:
                         element_type = data.get("type", "")
                         # Since we now have context fields in our objects, prioritize it
                         # For legacy data, we might still need to read from file
                         nodes_with_code.append(node)
-                        code_contents.append(data["code_content"])
+                        code_contents.append(data["code_context"])
                     except Exception as e:
                         logger.warning(f"Error getting code content for {node}: {e}")
                 else:
                     nodes_with_code.append(node)
-                    code_contents.append(data["code_content"])
+                    code_contents.append(data["code_context"])
                     
             # Get documentation embedding
-            if "docstring" in data and data["docstring"]:
+            if "doc_context" in data and data["doc_context"]:
                 nodes_with_doc.append(node)
-                docstrings.append(data["docstring"])
+                docstrings.append(data["doc_context"])
         
         # Batch embed code
         if nodes_with_code:

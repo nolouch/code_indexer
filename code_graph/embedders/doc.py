@@ -2,21 +2,19 @@
 from typing import List, Dict, Any, Optional
 import logging
 import numpy as np
+from sentence_transformers import SentenceTransformer
+
+from setting.embedding import EMBEDDING_MODEL
 
 logger = logging.getLogger(__name__)
 
 class DocEmbedder:
     """Embeds documentation into vector space."""
     
-    def __init__(self, model_name: str = ""):
-        """Initialize doc embedder.
-        
-        Args:
-            model_name: Optional name of the model to use for embedding
-        """
-        self.model_name = model_name
-        self.model = None
-        self.embedding_dim = 768  # Default embedding dimension
+    def __init__(self, model_name: str = None):
+        """Initialize doc embedder with optional model name."""
+        self.model = SentenceTransformer(model_name or EMBEDDING_MODEL["name"])
+        self.embedding_dim = EMBEDDING_MODEL["dimension"]  # Use dimension from config
         
         # Try to load embedding model if specified
         if model_name:
@@ -30,7 +28,6 @@ class DocEmbedder:
         """Load the embedding model."""
         try:
             # Try to import sentence-transformers
-            from sentence_transformers import SentenceTransformer
             self.model = SentenceTransformer(model_name)
             logger.info(f"Successfully loaded embedding model: {model_name}")
             # Update embedding dimension based on model
