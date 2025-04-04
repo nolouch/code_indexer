@@ -2,16 +2,17 @@
 from typing import List, Dict, Any, Optional
 import logging
 import numpy as np
-from llm.embedding import get_text_embedding
+from llm.embedding import get_text_embedding, batch_get_text_embedding
 
 from setting.embedding import EMBEDDING_MODEL
+from code_graph.config import get_config
 
 logger = logging.getLogger(__name__)
 
 class OpenAIEmbedder:
     """Base class for embedding using OpenAI's API."""
     
-    def __init__(self, embedding_dim=None, model=None):
+    def __init__(self, embedding_dim=None, model=None, batch_size=None):
         """Initialize OpenAI embedder.
         
         Args:
@@ -19,9 +20,13 @@ class OpenAIEmbedder:
                 uses the dimension from settings.
             model (str, optional): OpenAI model to use. If not provided,
                 uses the model from settings.
+            batch_size (int, optional): Maximum number of embeddings to send in one API call.
+                If not provided, uses the value from code_graph config.
         """
         self.model = model or EMBEDDING_MODEL.get("openai_model", "text-embedding-3-small")
         self.embedding_dim = embedding_dim or EMBEDDING_MODEL.get("openai_dimension", 1536)
+        config = get_config()
+        self.batch_size = batch_size or config.get("batch_size", 16)
         
     def embed(self, text: str) -> List[float]:
         """Embed text using OpenAI's API.
@@ -39,7 +44,7 @@ class OpenAIEmbedder:
             return self._get_random_embedding()
         
     def batch_embed(self, texts: List[str]) -> List[List[float]]:
-        """Embed multiple texts using OpenAI's API.
+        """Embed multiple texts using OpenAI's API in a single batch request.
         
         Args:
             texts (List[str]): List of texts to embed
@@ -47,17 +52,16 @@ class OpenAIEmbedder:
         Returns:
             List[List[float]]: List of embedding vectors as lists
         """
-        results = []
-        for text in texts:
-            if not text or not isinstance(text, str):
-                results.append(self._get_random_embedding())
-                continue
-            try:
-                results.append(self.embed(text))
-            except Exception as e:
-                logger.error(f"Error getting OpenAI batch embedding: {e}")
-                results.append(self._get_random_embedding())
-        return results
+        try:
+            # Directly process all texts without validity checks
+            if texts:
+                return batch_get_text_embedding(texts, model=self.model, max_batch_size=self.batch_size)
+            else:
+                return []
+        except Exception as e:
+            logger.error(f"Error in batch embedding: {e}")
+            # Return random embeddings as fallback
+            return [self._get_random_embedding() for _ in range(len(texts))]
     
     def _get_random_embedding(self) -> List[float]:
         """Generate a random embedding vector."""

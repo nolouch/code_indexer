@@ -2,24 +2,29 @@ from typing import Dict, List, Optional, Any
 import networkx as nx
 import logging
 from pathlib import Path
+from tqdm import tqdm
 from core.models import CodeRepository, Module, CodeElement
 from .embedders import create_embedder
+from .config import get_config
 
 logger = logging.getLogger(__name__)
 
 class SemanticGraphBuilder:
     """Builds semantic graphs from code analysis results"""
     
-    def __init__(self, code_embedder=None, doc_embedder=None):
+    def __init__(self, code_embedder=None, doc_embedder=None, batch_size=None):
         """Initialize builder with embedders.
         
         Args:
             code_embedder: Code embedder, will create default if None
             doc_embedder: Documentation embedder, will create default if None
+            batch_size: Size of batches for embedding operations, uses config default if None
         """
         # Use the factory to create appropriate embedders based on configuration
         self.code_embedder = code_embedder or create_embedder("code")
         self.doc_embedder = doc_embedder or create_embedder("doc")
+        config = get_config()
+        self.batch_size = batch_size or config.get("batch_size", 32)
         
     def build_from_repository(self, code_repo: CodeRepository) -> nx.DiGraph:
         """Build semantic graph from a code repository.
@@ -220,33 +225,53 @@ class SemanticGraphBuilder:
         
         # Generate and add embeddings
         logger.info("Generating embeddings for nodes...")
-        for node_id, node_data in semantic_graph.nodes(data=True):
-            try:
-                # Get content for embedding
+        
+        # Batch processing for embeddings
+        node_ids = list(semantic_graph.nodes())
+        total_nodes = len(node_ids)
+        logger.info(f"Processing embeddings for {total_nodes} nodes with batch size {self.batch_size}")
+        
+        # Calculate total number of batches
+        total_batches = (total_nodes + self.batch_size - 1) // self.batch_size
+        
+        # Process in batches with progress bar
+        for batch_start in tqdm(range(0, total_nodes, self.batch_size), total=total_batches, 
+                               desc=f"Batches (size={self.batch_size})", unit="batch"):
+            batch_end = min(batch_start + self.batch_size, total_nodes)
+            batch_node_ids = node_ids[batch_start:batch_end]
+            
+            # Collect content for the current batch
+            batch_code_contents = []
+            batch_doc_contents = []
+            
+            for node_id in batch_node_ids:
+                node_data = semantic_graph.nodes[node_id]
                 code_content = node_data.get('code_context', '')
                 doc_content = node_data.get('doc_context', '')
-                
-                # Generate code embedding
-                if code_content:
-                    code_embedding = self.code_embedder.embed(code_content)
-                    semantic_graph.nodes[node_id]['code_embedding'] = code_embedding
-                else:
-                    # Generate empty embedding with right dimensions if no code content
-                    semantic_graph.nodes[node_id]['code_embedding'] = [0.0] * self.code_embedder.embedding_dim
-                
-                # Generate doc embedding
-                if doc_content:
-                    doc_embedding = self.doc_embedder.embed(doc_content)
-                    semantic_graph.nodes[node_id]['doc_embedding'] = doc_embedding
-                else:
-                    # Generate empty embedding with right dimensions if no doc content
-                    semantic_graph.nodes[node_id]['doc_embedding'] = [0.0] * self.doc_embedder.embedding_dim
-                    
+                batch_code_contents.append(code_content)
+                batch_doc_contents.append(doc_content)
+            
+            # Generate code embeddings for the batch
+            logger.debug(f"Generating code embeddings for batch {batch_start//self.batch_size + 1}/{(total_nodes+self.batch_size-1)//self.batch_size}")
+            try:
+                batch_code_embeddings = self.code_embedder.batch_embed(batch_code_contents)
             except Exception as e:
-                logger.error(f"Error generating embeddings for node {node_id}: {e}")
-                # Ensure there are default embeddings even when errors occur
-                semantic_graph.nodes[node_id]['code_embedding'] = [0.0] * self.code_embedder.embedding_dim
-                semantic_graph.nodes[node_id]['doc_embedding'] = [0.0] * self.doc_embedder.embedding_dim
-                continue
+                logger.error(f"Error generating batch code embeddings: {e}")
+                # Use fallback: generate empty embeddings with right dimensions
+                batch_code_embeddings = [[0.0] * self.code_embedder.embedding_dim for _ in range(len(batch_code_contents))]
+            
+            # Generate doc embeddings for the batch
+            logger.debug(f"Generating doc embeddings for batch {batch_start//self.batch_size + 1}/{(total_nodes+self.batch_size-1)//self.batch_size}")
+            try:
+                batch_doc_embeddings = self.doc_embedder.batch_embed(batch_doc_contents)
+            except Exception as e:
+                logger.error(f"Error generating batch doc embeddings: {e}")
+                # Use fallback: generate empty embeddings with right dimensions
+                batch_doc_embeddings = [[0.0] * self.doc_embedder.embedding_dim for _ in range(len(batch_doc_contents))]
+            
+            # Assign embeddings to nodes for the current batch
+            for i, node_id in enumerate(batch_node_ids):
+                semantic_graph.nodes[node_id]['code_embedding'] = batch_code_embeddings[i]
+                semantic_graph.nodes[node_id]['doc_embedding'] = batch_doc_embeddings[i]
         
         return semantic_graph 

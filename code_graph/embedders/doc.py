@@ -2,24 +2,30 @@
 from typing import List, Dict, Any, Optional
 import logging
 import numpy as np
+from tqdm import tqdm
 from sentence_transformers import SentenceTransformer
 
 from setting.embedding import EMBEDDING_MODEL
+from code_graph.config import get_config
 
 logger = logging.getLogger(__name__)
 
 class DocEmbedder:
     """Embeds documentation into vectors."""
     
-    def __init__(self, embedding_dim=None):
+    def __init__(self, embedding_dim=None, batch_size=None):
         """Initialize documentation embedder.
         
         Args:
             embedding_dim (int, optional): Embedding dimension. If not provided,
                 uses the dimension from settings.
+            batch_size (int, optional): Maximum number of embeddings to process in one batch.
+                If not provided, uses the value from code_graph config.
         """
         self.model = SentenceTransformer(EMBEDDING_MODEL["name"])
         self.embedding_dim = embedding_dim or EMBEDDING_MODEL["dimension"]
+        config = get_config()
+        self.batch_size = batch_size or config.get("batch_size", 32)
         
     def embed(self, doc: str) -> List[float]:
         """Embed a documentation string into a vector.
@@ -42,18 +48,34 @@ class DocEmbedder:
         Returns:
             List[List[float]]: List of embedding vectors as lists
         """
-        # Filter out invalid docs
-        valid_docs = [doc for doc in docs if doc and isinstance(doc, str)]
-        
-        if not valid_docs:
+        if not docs:
             return []
-            
-        # Clean and truncate docs
+        
+        # Clean and truncate docs if needed, but don't filter
         max_length = 2048
-        processed_docs = [doc.strip()[:max_length] for doc in valid_docs]
-                
-        embeddings = self.model.encode(processed_docs)
-        return [e.tolist() for e in embeddings]
+        processed_docs = [doc.strip()[:max_length] if doc and isinstance(doc, str) else "" for doc in docs]
+            
+        try:
+            # Process docs in batches without validity checks
+            results = []
+            
+            # Calculate total number of batches
+            total_batches = (len(processed_docs) + self.batch_size - 1) // self.batch_size
+            
+            # Process batches with progress bar
+            for i in tqdm(range(0, len(processed_docs), self.batch_size), 
+                         total=total_batches, 
+                         desc=f"Batches (size={self.batch_size})", 
+                         unit="batch"):
+                batch = processed_docs[i:i + self.batch_size]
+                batch_embeddings = self.model.encode(batch)
+                results.extend([e.tolist() for e in batch_embeddings])
+            
+            return results
+        except Exception as e:
+            logger.error(f"Error in batch doc embedding: {e}")
+            # Return random embeddings as fallback
+            return [self._get_random_embedding() for _ in range(len(docs))]
 
     def _load_model(self, model_name: str):
         """Load the embedding model."""

@@ -2,24 +2,30 @@
 from typing import List, Dict, Any, Optional
 import logging
 import numpy as np
+from tqdm import tqdm
 from sentence_transformers import SentenceTransformer
 
 from setting.embedding import EMBEDDING_MODEL
+from code_graph.config import get_config
 
 logger = logging.getLogger(__name__)
 
 class CodeEmbedder:
     """Embeds code snippets into vectors."""
     
-    def __init__(self, embedding_dim=None):
+    def __init__(self, embedding_dim=None, batch_size=None):
         """Initialize code embedder.
         
         Args:
             embedding_dim (int, optional): Embedding dimension. If not provided,
                 uses the dimension from settings.
+            batch_size (int, optional): Maximum number of embeddings to process in one batch.
+                If not provided, uses the value from code_graph config.
         """
         self.model = SentenceTransformer(EMBEDDING_MODEL["name"])
         self.embedding_dim = embedding_dim or EMBEDDING_MODEL["dimension"]
+        config = get_config()
+        self.batch_size = batch_size or config.get("batch_size", 32)
         
     def embed(self, code: str) -> List[float]:
         """Embed a code snippet into a vector.
@@ -42,8 +48,30 @@ class CodeEmbedder:
         Returns:
             List[List[float]]: List of embedding vectors as lists
         """
-        embeddings = self.model.encode(codes)
-        return [e.tolist() for e in embeddings]
+        if not codes:
+            return []
+            
+        try:
+            # Process codes in batches without validity checks
+            results = []
+            
+            # Calculate total number of batches
+            total_batches = (len(codes) + self.batch_size - 1) // self.batch_size
+            
+            # Process batches with progress bar
+            for i in tqdm(range(0, len(codes), self.batch_size), 
+                         total=total_batches, 
+                         desc=f"Batches (size={self.batch_size})", 
+                         unit="batch"):
+                batch = codes[i:i + self.batch_size]
+                batch_embeddings = self.model.encode(batch)
+                results.extend([e.tolist() for e in batch_embeddings])
+            
+            return results
+        except Exception as e:
+            logger.error(f"Error in batch code embedding: {e}")
+            # Return random embeddings as fallback
+            return [self._get_random_embedding() for _ in range(len(codes))]
 
     def _load_model(self, model_name: str):
         """Load the embedding model."""
