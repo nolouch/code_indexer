@@ -786,6 +786,7 @@ async def search_file_indexer(
 async def get_file_by_path(
     file_path: str = Query(..., description="Path to the file to retrieve", example="/path/to/file.py"),
     max_chunks: Optional[int] = Query(default=None, description="Maximum number of chunks to return (None for all chunks)"),
+    offset: int = Query(default=0, description="Chunk offset for pagination (0-based)", ge=0),
 ):
     """
     Get the content of a file by its path.
@@ -795,6 +796,7 @@ async def get_file_by_path(
     Args:
         file_path: The path of the file to retrieve
         max_chunks: Maximum number of chunks to return (None for all chunks)
+        offset: Chunk offset for pagination (0-based)
         
     Returns:
         File content and metadata.
@@ -890,11 +892,23 @@ async def get_file_by_path(
                 
                 print(f"[API] Found file ID {file.id} at path {file.file_path} via {match_method}")
                 
-                # Get file content
+                # Validate offset
+                if offset >= file.chunks_count:
+                    if file.chunks_count > 0:
+                        raise HTTPException(
+                            status_code=400, 
+                            detail=f"Invalid offset: {offset}. File has {file.chunks_count} chunks (0-{file.chunks_count-1})"
+                        )
+                    else:
+                        # If the file has no chunks, we'll handle it below
+                        offset = 0
+                
+                # Get file content with pagination
                 chunks_query = text("""
                     SELECT content FROM file_chunks 
                     WHERE file_id = :file_id
                     ORDER BY chunk_index
+                    OFFSET :chunk_offset
                     LIMIT :chunk_limit
                 """)
                 
@@ -904,7 +918,10 @@ async def get_file_by_path(
                     chunks_to_fetch = max_chunks
                 
                 # Log the query
-                formatted_query = str(chunks_query).replace(":file_id", str(file.id)).replace(":chunk_limit", str(chunks_to_fetch))
+                formatted_query = str(chunks_query) \
+                    .replace(":file_id", str(file.id)) \
+                    .replace(":chunk_offset", str(offset)) \
+                    .replace(":chunk_limit", str(chunks_to_fetch))
                 print(f"[API-SQL] Chunks query: {formatted_query}")
                 
                 # Get file content
@@ -916,23 +933,32 @@ async def get_file_by_path(
                     full_content = "[File has no content chunks]"
                 else:
                     chunks = session.execute(chunks_query, {
-                        "file_id": file.id, 
+                        "file_id": file.id,
+                        "chunk_offset": offset,
                         "chunk_limit": chunks_to_fetch
                     })
                     
                     chunks_loaded = 0
+                    start_chunk = offset
+                    end_chunk = offset
+                    
                     for chunk in chunks:
                         full_content += chunk.content
                         chunks_loaded += 1
+                        end_chunk = offset + chunks_loaded - 1
                     
-                    print(f"[API] Loaded {chunks_loaded} chunks for file {file.file_path}")
+                    print(f"[API] Loaded {chunks_loaded} chunks for file {file.file_path} (chunks {start_chunk}-{end_chunk})")
+                    
+                    # Add pagination info
+                    has_more = (offset + chunks_loaded) < file.chunks_count
+                    next_offset = offset + chunks_loaded if has_more else None
                     
                     # Add truncation notice
-                    if max_chunks is not None and max_chunks < file.chunks_count:
-                        full_content += f"\n\n[Content truncated: showing {max_chunks} of {file.chunks_count} chunks]"
+                    if max_chunks is not None and max_chunks < (file.chunks_count - offset):
+                        full_content += f"\n\n[Content truncated: showing chunks {start_chunk}-{end_chunk} of {file.chunks_count} total chunks]"
                 
                 # Return file information and content
-                return {
+                response = {
                     "id": file.id,
                     "file_path": file.file_path,
                     "language": file.language or "unknown",
@@ -940,8 +966,17 @@ async def get_file_by_path(
                     "file_size": file.file_size,
                     "chunks_count": file.chunks_count,
                     "match_method": match_method,
-                    "content": full_content
+                    "content": full_content,
+                    "pagination": {
+                        "offset": offset,
+                        "limit": chunks_loaded,
+                        "total_chunks": file.chunks_count,
+                        "has_more": offset + chunks_loaded < file.chunks_count,
+                        "next_offset": next_offset
+                    }
                 }
+                
+                return response
             except HTTPException:
                 raise
             except Exception as db_error:
@@ -966,6 +1001,7 @@ async def get_file_by_path(
 async def get_file_by_id(
     file_id: int = Path(..., description="ID of the file to retrieve", gt=0),
     max_chunks: Optional[int] = Query(default=None, description="Maximum number of chunks to return (None for all chunks)"),
+    offset: int = Query(default=0, description="Chunk offset for pagination (0-based)", ge=0),
 ):
     """
     Get the content of a file by its ID.
@@ -976,6 +1012,7 @@ async def get_file_by_id(
     Args:
         file_id: The ID of the file to retrieve
         max_chunks: Maximum number of chunks to return (None for all chunks)
+        offset: Chunk offset for pagination (0-based)
         
     Returns:
         File content and metadata.
@@ -1009,11 +1046,23 @@ async def get_file_by_id(
                 
                 print(f"[API] Found file ID {file_id} at path {file.file_path}")
                 
-                # Get file content
+                # Validate offset
+                if offset >= file.chunks_count:
+                    if file.chunks_count > 0:
+                        raise HTTPException(
+                            status_code=400, 
+                            detail=f"Invalid offset: {offset}. File has {file.chunks_count} chunks (0-{file.chunks_count-1})"
+                        )
+                    else:
+                        # If the file has no chunks, we'll handle it below
+                        offset = 0
+                
+                # Get file content with pagination
                 chunks_query = text("""
                     SELECT content FROM file_chunks 
                     WHERE file_id = :file_id
                     ORDER BY chunk_index
+                    OFFSET :chunk_offset
                     LIMIT :chunk_limit
                 """)
                 
@@ -1023,7 +1072,10 @@ async def get_file_by_id(
                     chunks_to_fetch = max_chunks
                 
                 # Log the query
-                formatted_query = str(chunks_query).replace(":file_id", str(file.id)).replace(":chunk_limit", str(chunks_to_fetch))
+                formatted_query = str(chunks_query) \
+                    .replace(":file_id", str(file.id)) \
+                    .replace(":chunk_offset", str(offset)) \
+                    .replace(":chunk_limit", str(chunks_to_fetch))
                 print(f"[API-SQL] Chunks query: {formatted_query}")
                 
                 # Get file content
@@ -1035,31 +1087,49 @@ async def get_file_by_id(
                     full_content = "[File has no content chunks]"
                 else:
                     chunks = session.execute(chunks_query, {
-                        "file_id": file.id, 
+                        "file_id": file.id,
+                        "chunk_offset": offset,
                         "chunk_limit": chunks_to_fetch
                     })
                     
                     chunks_loaded = 0
+                    start_chunk = offset
+                    end_chunk = offset
+                    
                     for chunk in chunks:
                         full_content += chunk.content
                         chunks_loaded += 1
+                        end_chunk = offset + chunks_loaded - 1
                     
-                    print(f"[API] Loaded {chunks_loaded} chunks for file {file.file_path}")
+                    print(f"[API] Loaded {chunks_loaded} chunks for file {file.file_path} (chunks {start_chunk}-{end_chunk})")
+                    
+                    # Add pagination info
+                    has_more = (offset + chunks_loaded) < file.chunks_count
+                    next_offset = offset + chunks_loaded if has_more else None
                     
                     # Add truncation notice
-                    if max_chunks is not None and max_chunks < file.chunks_count:
-                        full_content += f"\n\n[Content truncated: showing {max_chunks} of {file.chunks_count} chunks]"
+                    if max_chunks is not None and max_chunks < (file.chunks_count - offset):
+                        full_content += f"\n\n[Content truncated: showing chunks {start_chunk}-{end_chunk} of {file.chunks_count} total chunks]"
                 
                 # Return file information and content
-                return {
+                response = {
                     "id": file.id,
                     "file_path": file.file_path,
                     "language": file.language or "unknown",
                     "repo_name": file.repo_name,
                     "file_size": file.file_size,
                     "chunks_count": file.chunks_count,
-                    "content": full_content
+                    "content": full_content,
+                    "pagination": {
+                        "offset": offset,
+                        "limit": chunks_loaded,
+                        "total_chunks": file.chunks_count,
+                        "has_more": offset + chunks_loaded < file.chunks_count,
+                        "next_offset": next_offset
+                    }
                 }
+                
+                return response
             except HTTPException:
                 # Re-raise HTTP exceptions
                 raise

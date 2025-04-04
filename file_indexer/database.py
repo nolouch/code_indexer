@@ -21,8 +21,8 @@ Base = declarative_base()
 # 使用setting中的嵌入维度
 EMBEDDING_DIM = CODE_EMBEDDING_DIM
 
-# Maximum size of each chunk (64KB)
-CHUNK_SIZE = 64 * 1024
+# Maximum size of each chunk (2KB)
+CHUNK_SIZE = 2 * 1024
 
 class VECTOR(UserDefinedType):
     """Custom type for TiDB VECTOR data type."""
