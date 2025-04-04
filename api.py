@@ -372,6 +372,74 @@ async def search_code_graph(request: CodeSearchRequest):
         )
 
 
+@app.post("/code_graph/full_text_search", response_model=CodeSearchResponse, tags=["Code Graph"])
+async def full_text_search_code_graph(request: CodeSearchRequest):
+    """
+    Search the code graph for nodes containing the query text using full text search.
+
+    This endpoint finds nodes that contain exact matches of the query text in their code_context using SQL LIKE queries.
+
+    - **query**: The search query text
+    - **repository_name**: Name of the repository
+    - **limit**: Maximum number of results to return (default: 10)
+
+    Returns:
+        A list of code nodes matching the query, ordered by relevance.
+    """
+    if not code_graph_db or not code_graph_db.available:
+        logger.error(
+            f"Code graph database not initialized or unavailable, cannot execute full text search query: {request.query}"
+        )
+        raise HTTPException(
+            status_code=503, detail="Code graph database not initialized or unavailable"
+        )
+
+    try:
+        # Use repository name directly in the search
+        logger.info(
+            f"Executing full text code search: {request.query}, repository name: {request.repository_name}"
+        )
+
+        # Execute the search with repository name
+        results = code_graph_db.full_text_search(
+            repo_name=request.repository_name,
+            query=request.query,
+            limit=request.limit,
+        )
+
+        # Convert the results to the response model format
+        nodes = []
+        for result in results:
+            # Extract content and documentation
+            code_content = result.get("code_context", None)
+            doc_content = result.get("doc_context", None)
+
+            # Fall back to docstring if doc_context is not available
+            if doc_content is None:
+                doc_content = result.get("docstring", None)
+
+            node = CodeNode(
+                id=result["id"],
+                name=result["name"],
+                type=result["type"],
+                file_path=result["file_path"],
+                line=result["line"],
+                similarity=result["similarity"],
+                code_content=code_content,
+                doc_content=doc_content,
+            )
+            nodes.append(node)
+
+        logger.info(f"Found {len(nodes)} matching nodes with full text search")
+        return CodeSearchResponse(results=nodes)
+    except Exception as e:
+        logger.error(f"Error processing full text search query '{request.query}': {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500, detail=f"Error searching code graph with full text: {str(e)}"
+        )
+
+
 @app.get("/code_graph/repositories/stats", tags=["Code Graph"])
 async def get_repository_stats(
     repository_name: str = Query(..., description="Name of the code repository")
@@ -1163,6 +1231,15 @@ curl -X POST "http://localhost:8000/code_graph/search" \
     "repository_name": "tidb",
     "limit": 5,
     "use_doc_embedding": false
+  }'
+
+# Full text search for code in a repository by name
+curl -X POST "http://localhost:8000/code_graph/full_text_search" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "implement transaction",
+    "repository_name": "tidb",
+    "limit": 5
   }'
 
 # Get repository statistics by name

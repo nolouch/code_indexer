@@ -9,6 +9,7 @@ import numpy as np  # For vector handling
 import logging
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func
+import traceback
 
 from setting.db import SessionLocal, engine
 from setting.base import DATABASE_URI
@@ -559,6 +560,105 @@ class GraphDBManager:
                     
         except Exception as e:
             logger.error(f"Error in vector search: {e}")
+            return []
+
+    def full_text_search(self, repo_name: str, query: str = None, 
+                        limit: int = VECTOR_SEARCH["default_limit"]) -> List[Dict[str, Any]]:
+        """Perform a full text search using the query string.
+        
+        Args:
+            repo_name: Repository name
+            query: Search query string
+            limit: Maximum number of results to return
+            
+        Returns:
+            List of matching nodes with their data
+        """
+        if not self.available:
+            logger.warning("Cannot perform full text search - database is not available")
+            return []
+        
+        if not query:
+            logger.warning("Cannot perform full text search - query string is empty")
+            return []
+            
+        if not repo_name:
+            logger.warning("Cannot perform full text search - repository name not provided")
+            return []
+        
+        try:
+            # Find repository by name
+            with SessionLocal() as session:
+                repo = session.query(Repository).filter(Repository.name == repo_name).first()
+                if not repo:
+                    logger.warning(f"Repository not found by name: {repo_name}")
+                    return []
+                
+                # Use LIKE for text search in code_context
+                like_query = f"%{query}%"
+                
+                query_sql = """
+                    SELECT 
+                        id, node_id, type, name, file_path, line_number, code_context, doc_context
+                    FROM 
+                        nodes
+                    WHERE 
+                        repository_id = :repo_id
+                        AND code_context LIKE :query
+                    LIMIT :limit
+                """
+                
+                # Execute query
+                results = session.execute(
+                    text(query_sql), 
+                    {
+                        "repo_id": repo.id, 
+                        "query": like_query,
+                        "limit": limit
+                    }
+                ).fetchall()
+                
+                # Process results
+                processed_results = []
+                for row in results:
+                    # Parse contexts
+                    code_context = {}
+                    doc_context = {}
+                    
+                    if row.code_context:
+                        try:
+                            code_context = json.loads(row.code_context)
+                        except json.JSONDecodeError:
+                            code_context = {"error": "Invalid JSON in code_context"}
+                            
+                    if row.doc_context:
+                        try:
+                            doc_context = json.loads(row.doc_context)
+                        except json.JSONDecodeError:
+                            doc_context = {"error": "Invalid JSON in doc_context"}
+                    
+                    # Combine all data
+                    node_data = {
+                        "id": row.node_id,
+                        "name": row.name,
+                        "type": row.type,
+                        "file_path": row.file_path,
+                        "line": row.line_number,
+                        "similarity": 1.0 - (0.05 * len(processed_results)),  # Simple ranking
+                    }
+                    
+                    # Add context data
+                    node_data.update(code_context)
+                    node_data.update(doc_context)
+                    
+                    processed_results.append(node_data)
+                    
+                logger.info(f"Found {len(processed_results)} matching nodes using full text search")
+                return processed_results
+                    
+        except Exception as e:
+            logger.error(f"Error in full text search: {e}")
+            logger.error(traceback.format_exc())
             return []
 
     def _get_or_create_repository(self, session: Session, path: str) -> Repository:
