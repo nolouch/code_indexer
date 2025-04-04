@@ -233,14 +233,14 @@ class CodeIndexer:
             logger.error(f"Database error for file {file_path}: {e}")
             raise
     
-    def search_similar(self, query_text, limit=None, show_content=True, max_chunks=None, repository=None, search_type="vector"):
+    def search_similar(self, query_text, limit=None, show_content=True, sibling_chunk_num=1, repository=None, search_type="vector"):
         """Search for files similar to the query text
         
         Args:
             query_text: Text to search for
             limit: Maximum number of results to return
             show_content: Whether to include file content in results
-            max_chunks: Maximum number of chunks to return (None for all chunks)
+            sibling_chunk_num: Number of sibling chunks to include around each match (default: 1)
             repository: Optional repository name to filter results
             search_type: Type of search to perform ("vector" or "full_text")
         """
@@ -252,11 +252,12 @@ class CodeIndexer:
         
         # Use full text search if requested
         if search_type == "full_text":
+
             return self.search_full_text(
                 query_text, 
                 limit=limit,
                 show_content=show_content,
-                max_chunks=max_chunks,
+                sibling_chunk_num=sibling_chunk_num,
                 repository=repository
             )
             
@@ -270,7 +271,7 @@ class CodeIndexer:
                     query_embedding, 
                     limit=limit,
                     show_content=show_content,
-                    max_chunks=max_chunks,
+                    sibling_chunk_num=sibling_chunk_num,
                     repository=repository
                 )
             else:
@@ -280,14 +281,14 @@ class CodeIndexer:
             logger.error(f"Error searching: {e}")
             return []
     
-    def _tidb_vector_search(self, query_embedding, limit=10, show_content=True, max_chunks=None, repository=None):
+    def _tidb_vector_search(self, query_embedding, limit=10, show_content=True, sibling_chunk_num=1, repository=None):
         """Use TiDB's native vector search capability
         
         Args:
             query_embedding: The embedding vector for the query
             limit: Maximum number of results to return
             show_content: Whether to include file content in results
-            max_chunks: Maximum number of chunks to return (None for all chunks)
+            sibling_chunk_num: Number of sibling chunks to include around each match (default: 1)
             repository: Optional repository name to filter results
         """
         # Convert embedding to TiDB vector format
@@ -334,8 +335,8 @@ class CodeIndexer:
                 if show_content:
                     # Determine how many chunks to fetch
                     chunks_to_fetch = row.chunks_count
-                    if max_chunks is not None and max_chunks < chunks_to_fetch:
-                        chunks_to_fetch = max_chunks
+                    if sibling_chunk_num is not None and sibling_chunk_num < chunks_to_fetch:
+                        chunks_to_fetch = sibling_chunk_num
                     
                     # Construct chunks query with limit if needed
                     chunks_query = text("""
@@ -353,8 +354,8 @@ class CodeIndexer:
                         file_content += chunk_row.content
                     
                     # Add indication if content is truncated
-                    if max_chunks is not None and max_chunks < row.chunks_count:
-                        file_content += f"\n\n[Content truncated: showing {max_chunks} of {row.chunks_count} chunks]"
+                    if sibling_chunk_num is not None and sibling_chunk_num < row.chunks_count:
+                        file_content += f"\n\n[Content truncated: showing {sibling_chunk_num} of {row.chunks_count} chunks]"
                     
                 similarity = 1.0 - float(row.score)  # Convert distance to similarity
                 results.append((file, similarity, file_content))
@@ -365,14 +366,14 @@ class CodeIndexer:
         """Close the database session"""
         self.session.close() 
     
-    def search_full_text(self, query_text, limit=10, show_content=True, max_chunks=None, repository=None):
+    def search_full_text(self, query_text, limit=10, show_content=True, sibling_chunk_num=1, repository=None):
         """Search for files containing the query text using full text search
         
         Args:
             query_text: Text to search for
             limit: Maximum number of results to return
             show_content: Whether to include file content in results
-            max_chunks: Maximum number of chunks to return (None for all chunks)
+            sibling_chunk_num: Number of sibling chunks to include around each match (default: 1)
             repository: Optional repository name to filter results
         """
         try:
@@ -452,8 +453,8 @@ class CodeIndexer:
                             
                             # Determine how many chunks to fetch
                             chunks_to_fetch = row.chunks_count
-                            if max_chunks is not None and max_chunks < chunks_to_fetch:
-                                chunks_to_fetch = max_chunks
+                            if sibling_chunk_num is not None and sibling_chunk_num < chunks_to_fetch:
+                                chunks_to_fetch = sibling_chunk_num
                             
                             # Execute chunks query without too much logging
                             chunks_params = {
@@ -482,8 +483,8 @@ class CodeIndexer:
                                     file_content += chunk_row.content
                                 
                                 # Add indication if content is truncated
-                                if max_chunks is not None and max_chunks < row.chunks_count:
-                                    file_content += f"\n\n[Content truncated: showing {max_chunks} of {row.chunks_count} chunks]"
+                                if sibling_chunk_num is not None and sibling_chunk_num < row.chunks_count:
+                                    file_content += f"\n\n[Content truncated: showing {sibling_chunk_num} of {row.chunks_count} chunks]"
                             except Exception as chunk_error:
                                 print(f"[ERROR] Failed to retrieve chunks for file ID {row.id}: {chunk_error}")
                         

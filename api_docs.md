@@ -30,7 +30,7 @@ Performs semantic vector search to find files conceptually related to your query
   "query": "implement transaction",
   "limit": 10,
   "show_content": true,
-  "max_chunks": 2,
+  "sibling_chunk_num": 2,
   "repository": "tidb"
 }
 ```
@@ -39,7 +39,7 @@ Performs semantic vector search to find files conceptually related to your query
 - `query`: The search query string (required)
 - `limit`: Maximum number of results to return (default: 10)
 - `show_content`: Whether to include file content in results (default: true)
-- `max_chunks`: Maximum number of chunks to return (null for all chunks)
+- `sibling_chunk_num`: Number of sibling chunks to include around each match (default: 1)
 - `repository`: Repository name to filter results (optional)
 
 **Example Request:**
@@ -109,12 +109,12 @@ Retrieves a file's content by its path with support for chunk pagination.
 
 **Query Parameters:**
 - `file_path`: Path to the file (required)
-- `max_chunks`: Maximum chunks to return (optional)
+- `sibling_chunk_num`: Number of sibling chunks to include around each match (default: 1)
 - `offset`: Chunk offset for pagination, 0-based (optional, default: 0)
 
 **Example Request:**
 ```bash
-curl -X GET "http://localhost:8000/file_indexer/file?file_path=%2Fpath%2Fto%2Ffile.go&offset=0&max_chunks=5" \
+curl -X GET "http://localhost:8000/file_indexer/file?file_path=%2Fpath%2Fto%2Ffile.go&offset=0&sibling_chunk_num=5" \
   -H "Accept: application/json"
 ```
 
@@ -141,8 +141,8 @@ curl -X GET "http://localhost:8000/file_indexer/file?file_path=%2Fpath%2Fto%2Ffi
 
 **Pagination:**
 
-To retrieve a file in chunks, use the `offset` and `max_chunks` parameters:
-1. Start with `offset=0` and a suitable `max_chunks` value
+To retrieve a file in chunks, use the `offset` and `sibling_chunk_num` parameters:
+1. Start with `offset=0` and a suitable `sibling_chunk_num` value
 2. Use the `next_offset` value from the response for subsequent requests
 3. Continue until `has_more` is false
 
@@ -154,12 +154,12 @@ Retrieves a file's content by its ID with pagination support.
 
 **Parameters:**
 - `file_id`: ID of the file (path parameter)
-- `max_chunks`: Maximum chunks to return (query parameter, optional)
+- `sibling_chunk_num`: Number of sibling chunks to include around each match (query parameter, default: 1)
 - `offset`: Chunk offset for pagination, 0-based (query parameter, optional, default: 0)
 
 **Example Request:**
 ```bash
-curl -X GET "http://localhost:8000/file_indexer/file/123?offset=5&max_chunks=5" \
+curl -X GET "http://localhost:8000/file_indexer/file/123?offset=5&sibling_chunk_num=5" \
   -H "Accept: application/json"
 ```
 
@@ -194,7 +194,7 @@ Works the same way as the Get File by Path endpoint.
 - `query`: The search query text (required)
 - `limit`: Maximum number of results to return (default: 10)
 - `show_content`: Whether to include file content in results (default: true)
-- `max_chunks`: Maximum number of chunks to return (null for all chunks)
+- `sibling_chunk_num`: Number of sibling chunks to include around each match (default: 1)
 - `repository`: Repository name to filter results (optional)
 - `search_type`: Type of search to perform - "vector" or "full_text" (default: "vector")
 
@@ -352,7 +352,7 @@ curl -X GET "http://localhost:8000/db_check"
 2. **Prefer vector search** for conceptual searches
 3. **Use full-text search** for exact keyword matches
 4. **Filter by repository** to narrow down results
-5. **Use pagination** for large files by setting `offset` and `max_chunks`
+5. **Use pagination** for large files by setting `offset` and `sibling_chunk_num`
 
 ## Common Usage Patterns
 
@@ -362,10 +362,10 @@ For large files, use pagination to retrieve content in chunks:
 
 ```bash
 # First request: get first 5 chunks
-curl -X GET "http://localhost:8000/file_indexer/file/123?offset=0&max_chunks=5"
+curl -X GET "http://localhost:8000/file_indexer/file/123?offset=0&sibling_chunk_num=5"
 
 # Second request: get next 5 chunks using the next_offset from previous response
-curl -X GET "http://localhost:8000/file_indexer/file/123?offset=5&max_chunks=5"
+curl -X GET "http://localhost:8000/file_indexer/file/123?offset=5&sibling_chunk_num=5"
 ```
 
 ### Finding and Retrieving Files

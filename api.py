@@ -582,7 +582,7 @@ class FileSearchRequest(BaseModel):
     query: str = Field(..., description="The search query")
     limit: int = Field(10, description="Maximum number of results to return")
     show_content: bool = Field(True, description="Whether to include file content in results")
-    max_chunks: Optional[int] = Field(None, description="Maximum number of chunks to return (None for all chunks)")
+    sibling_chunk_num: Optional[int] = Field(1, description="Number of sibling chunks to include around each match (default: 1)")
     repository: Optional[str] = Field(None, description="Repository name to filter results")
 
 
@@ -597,7 +597,7 @@ async def vector_search_files(request: FileSearchRequest):
         query: The search query string
         limit: Maximum number of results to return (default: 10)
         show_content: Whether to include file content in results (default: True)
-        max_chunks: Maximum number of chunks to return (None for all chunks)
+        sibling_chunk_num: Number of sibling chunks to include around each match (default: 1)
         repository: Repository name to filter results (optional)
         
     Returns:
@@ -613,7 +613,7 @@ async def vector_search_files(request: FileSearchRequest):
             query_text=request.query,
             limit=request.limit,
             show_content=request.show_content,
-            max_chunks=request.max_chunks,
+            sibling_chunk_num=request.sibling_chunk_num,
             repository=request.repository,
             search_type="vector"
         )
@@ -660,7 +660,7 @@ async def full_text_search_files(request: FileSearchRequest):
         query: The search query string
         limit: Maximum number of results to return (default: 10)
         show_content: Whether to include file content in results (default: True)
-        max_chunks: Maximum number of chunks to return (None for all chunks)
+        sibling_chunk_num: Number of sibling chunks to include around each match (default: 1)
         repository: Repository name to filter results (optional)
         
     Returns:
@@ -678,7 +678,7 @@ async def full_text_search_files(request: FileSearchRequest):
             query_text=request.query,
             limit=request.limit,
             show_content=request.show_content,
-            max_chunks=request.max_chunks,
+            sibling_chunk_num=request.sibling_chunk_num,
             repository=request.repository,
             search_type="full_text"
         )
@@ -716,7 +716,7 @@ async def search_file_indexer(
     query: str = Query(..., description="The search query"),
     limit: Optional[int] = Query(default=10, description="Maximum number of results to return"),
     show_content: Optional[bool] = Query(default=True, description="Whether to include file content in results"),
-    max_chunks: Optional[int] = Query(default=None, description="Maximum number of chunks to return (None for all chunks)"),
+    sibling_chunk_num: Optional[int] = Query(default=1, description="Number of sibling chunks to include around each match (default: 1)"),
     repository: Optional[str] = Query(default=None, description="Repository name to filter results"),
     search_type: Optional[str] = Query(default="vector", description="Type of search to perform", enum=["vector", "full_text"]),
 ):
@@ -729,7 +729,7 @@ async def search_file_indexer(
         query: The search query string
         limit: Maximum number of results to return (default: 10)
         show_content: Whether to include file content in results (default: True)
-        max_chunks: Maximum number of chunks to return (None for all chunks)
+        sibling_chunk_num: Number of sibling chunks to include around each match (default: 1)
         repository: Repository name to filter results (optional)
         search_type: Type of search to perform - "vector" (semantic) or "full_text" (default: "vector")
         
@@ -746,7 +746,7 @@ async def search_file_indexer(
             query_text=query,
             limit=limit,
             show_content=show_content,
-            max_chunks=max_chunks,
+            sibling_chunk_num=sibling_chunk_num,
             repository=repository,
             search_type=search_type
         )
@@ -785,7 +785,7 @@ async def search_file_indexer(
 @app.get("/file_indexer/file", tags=["File Indexer"])
 async def get_file_by_path(
     file_path: str = Query(..., description="Path to the file to retrieve", example="/path/to/file.py"),
-    max_chunks: Optional[int] = Query(default=None, description="Maximum number of chunks to return (None for all chunks)"),
+    sibling_chunk_num: Optional[int] = Query(default=1, description="Number of sibling chunks to include around each match (default: 1)"),
     offset: int = Query(default=0, description="Chunk offset for pagination (0-based)", ge=0),
 ):
     """
@@ -795,7 +795,7 @@ async def get_file_by_path(
     
     Args:
         file_path: The path of the file to retrieve
-        max_chunks: Maximum number of chunks to return (None for all chunks)
+        sibling_chunk_num: Number of sibling chunks to include around each match (default: 1)
         offset: Chunk offset for pagination (0-based)
         
     Returns:
@@ -914,8 +914,8 @@ async def get_file_by_path(
                 
                 # Determine how many chunks to fetch
                 chunks_to_fetch = file.chunks_count
-                if max_chunks is not None and max_chunks < chunks_to_fetch:
-                    chunks_to_fetch = max_chunks
+                if sibling_chunk_num is not None and sibling_chunk_num < chunks_to_fetch:
+                    chunks_to_fetch = sibling_chunk_num
                 
                 # Log the query
                 formatted_query = str(chunks_query) \
@@ -954,7 +954,7 @@ async def get_file_by_path(
                     next_offset = offset + chunks_loaded if has_more else None
                     
                     # Add truncation notice
-                    if max_chunks is not None and max_chunks < (file.chunks_count - offset):
+                    if sibling_chunk_num is not None and sibling_chunk_num < (file.chunks_count - offset):
                         full_content += f"\n\n[Content truncated: showing chunks {start_chunk}-{end_chunk} of {file.chunks_count} total chunks]"
                 
                 # Return file information and content
@@ -1000,7 +1000,7 @@ async def get_file_by_path(
 @app.get("/file_indexer/file/{file_id}", tags=["File Indexer"])
 async def get_file_by_id(
     file_id: int = Path(..., description="ID of the file to retrieve", gt=0),
-    max_chunks: Optional[int] = Query(default=None, description="Maximum number of chunks to return (None for all chunks)"),
+    sibling_chunk_num: Optional[int] = Query(default=1, description="Number of sibling chunks to include around each match (default: 1)"),
     offset: int = Query(default=0, description="Chunk offset for pagination (0-based)", ge=0),
 ):
     """
@@ -1011,7 +1011,7 @@ async def get_file_by_id(
     
     Args:
         file_id: The ID of the file to retrieve
-        max_chunks: Maximum number of chunks to return (None for all chunks)
+        sibling_chunk_num: Number of sibling chunks to include around each match (default: 1)
         offset: Chunk offset for pagination (0-based)
         
     Returns:
@@ -1068,8 +1068,8 @@ async def get_file_by_id(
                 
                 # Determine how many chunks to fetch
                 chunks_to_fetch = file.chunks_count
-                if max_chunks is not None and max_chunks < chunks_to_fetch:
-                    chunks_to_fetch = max_chunks
+                if sibling_chunk_num is not None and sibling_chunk_num < chunks_to_fetch:
+                    chunks_to_fetch = sibling_chunk_num
                 
                 # Log the query
                 formatted_query = str(chunks_query) \
@@ -1108,7 +1108,7 @@ async def get_file_by_id(
                     next_offset = offset + chunks_loaded if has_more else None
                     
                     # Add truncation notice
-                    if max_chunks is not None and max_chunks < (file.chunks_count - offset):
+                    if sibling_chunk_num is not None and sibling_chunk_num < (file.chunks_count - offset):
                         full_content += f"\n\n[Content truncated: showing chunks {start_chunk}-{end_chunk} of {file.chunks_count} total chunks]"
                 
                 # Return file information and content
@@ -1186,7 +1186,7 @@ curl -X POST "http://localhost:8000/file_indexer/vector_search" \
     "query": "implement transaction",
     "limit": 10,
     "show_content": true,
-    "max_chunks": 2,
+    "sibling_chunk_num": 2,
     "repository": "tidb"
   }'
 
@@ -1209,7 +1209,7 @@ curl -X GET "http://localhost:8000/file_indexer/file?file_path=%2Fpath%2Fto%2Ffi
   -H "Accept: application/json"
 
 # Get file content with limited chunks
-curl -X GET "http://localhost:8000/file_indexer/file?file_path=%2Fpath%2Fto%2Ffile.py&max_chunks=2" \
+curl -X GET "http://localhost:8000/file_indexer/file?file_path=%2Fpath%2Fto%2Ffile.py&sibling_chunk_num=2" \
   -H "Accept: application/json"
 
 # Get file content by ID
@@ -1217,6 +1217,6 @@ curl -X GET "http://localhost:8000/file_indexer/file/123" \
   -H "Accept: application/json"
 
 # Get file content by ID with limited chunks
-curl -X GET "http://localhost:8000/file_indexer/file/123?max_chunks=2" \
+curl -X GET "http://localhost:8000/file_indexer/file/123?sibling_chunk_num=2" \
   -H "Accept: application/json"
 """
