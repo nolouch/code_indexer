@@ -475,10 +475,10 @@ class GraphDBManager:
             return []
         
         # Generate embedding for the query
-        from sentence_transformers import SentenceTransformer
         try:
-            # Use configured embedding model
-            model = SentenceTransformer(EMBEDDING_MODEL["name"])
+            # Use cached model loader instead of creating a new instance each time
+            from llm.embedding import get_sentence_transformer
+            model = get_sentence_transformer(EMBEDDING_MODEL["name"])
             query_embedding = model.encode(query)
             
             # Find repository by name

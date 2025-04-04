@@ -7,6 +7,7 @@ from sentence_transformers import SentenceTransformer
 
 from setting.embedding import EMBEDDING_MODEL
 from code_graph.config import get_config
+from llm.embedding import get_sentence_transformer
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,7 @@ class CodeEmbedder:
             batch_size (int, optional): Maximum number of embeddings to process in one batch.
                 If not provided, uses the value from code_graph config.
         """
-        self.model = SentenceTransformer(EMBEDDING_MODEL["name"])
+        self.model = get_sentence_transformer(EMBEDDING_MODEL["name"])
         self.embedding_dim = embedding_dim or EMBEDDING_MODEL["dimension"]
         config = get_config()
         self.batch_size = batch_size or config.get("batch_size", 32)

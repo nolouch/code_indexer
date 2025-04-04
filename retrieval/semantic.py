@@ -3,12 +3,13 @@ from typing import List, Dict, Any
 import networkx as nx
 from sentence_transformers import SentenceTransformer
 from setting.embedding import EMBEDDING_MODEL
+from llm.embedding import get_sentence_transformer
 
 class SemanticRetriever:
     """Semantic code search using embeddings and graph structure"""
     
     def __init__(self):
-        self.model = SentenceTransformer(EMBEDDING_MODEL["name"])
+        self.model = get_sentence_transformer(EMBEDDING_MODEL["name"])
         self.graph = None
         
     def setup(self, graph: nx.MultiDiGraph):

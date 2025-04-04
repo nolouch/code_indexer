@@ -96,7 +96,8 @@ class Repository:
         
         # Otherwise, try semantic matching if we have embeddings
         try:
-            embedding_model = SentenceTransformer(EMBEDDING_MODEL["name"])
+            from llm.embedding import get_sentence_transformer
+            embedding_model = get_sentence_transformer(EMBEDDING_MODEL["name"])
             query_embedding = embedding_model.encode(query)
             
             # Calculate semantic similarity for nodes with embeddings
@@ -317,8 +318,8 @@ class SimpleEmbedder:
         
         # Try to import sentence-transformers
         try:
-            from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(EMBEDDING_MODEL["name"])
+            from llm.embedding import get_sentence_transformer
+            self.model = get_sentence_transformer(EMBEDDING_MODEL["name"])
             self.use_model = True
             logger.info("Using SentenceTransformer for embeddings")
         except ImportError:

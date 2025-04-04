@@ -8,12 +8,13 @@ from pydantic import BaseModel, Field
 
 from knowledgebase.best_practices import BestPracticesKnowledgeBase
 from llm.factory import LLMInterface
-from llm.embedding import get_text_embedding
+from llm.embedding import get_text_embedding, get_sentence_transformer
 from code_graph.db_manager import GraphDBManager
 from code_graph import create_openai_builder
 from setting.base import DATABASE_URI
 from setting.db import SessionLocal, Base, engine
 from knowledgebase.knowledge_graph import GraphKnowledgeBase
+from setting.embedding import EMBEDDING_MODEL
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -42,6 +43,15 @@ try:
                 logger.error(traceback.format_exc())
     else:
         logger.warning("DATABASE_URI is not set! Database features will be limited.")
+
+    # Pre-load the embedding model to improve performance
+    logger.info("Pre-loading embedding model...")
+    try:
+        embedding_model = get_sentence_transformer(EMBEDDING_MODEL["name"])
+        logger.info(f"Successfully pre-loaded embedding model: {EMBEDDING_MODEL['name']}")
+    except Exception as e:
+        logger.error(f"Error pre-loading embedding model: {e}")
+        logger.error(traceback.format_exc())
 
     # Configure LLM client
     logger.info("Initializing LLM client...")

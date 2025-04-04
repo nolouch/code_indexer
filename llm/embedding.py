@@ -3,6 +3,8 @@ import openai
 import json
 import logging
 from tqdm import tqdm
+import numpy as np
+from functools import lru_cache
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +15,34 @@ except Exception as e:
     logger.error(f"Error initializing OpenAI client: {e}")
     embedding_model = None
 
+# Global cache for SentenceTransformer models
+_sentence_transformer_models = {}
+
+@lru_cache(maxsize=8)
+def get_sentence_transformer(model_name):
+    """Get a cached SentenceTransformer model instance.
+    
+    Args:
+        model_name (str): Name of the model to load
+        
+    Returns:
+        SentenceTransformer: The loaded model
+    """
+    if model_name in _sentence_transformer_models:
+        return _sentence_transformer_models[model_name]
+    
+    try:
+        from sentence_transformers import SentenceTransformer
+        logger.info(f"Loading SentenceTransformer model: {model_name}")
+        model = SentenceTransformer(model_name)
+        _sentence_transformer_models[model_name] = model
+        return model
+    except ImportError:
+        logger.error("sentence-transformers package not installed")
+        raise
+    except Exception as e:
+        logger.error(f"Error loading SentenceTransformer model {model_name}: {e}")
+        raise
 
 def get_text_embedding(text: str, model="text-embedding-3-small"):
     """Get embedding for a text using OpenAI's API.
