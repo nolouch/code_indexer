@@ -9,7 +9,10 @@ from llm.factory import LLMInterface
 from knowledgebase.doc_model import BestPractice
 from setting.db import SessionLocal
 from utils.json_utils import extract_json
-from knowledgebase.doc_spec import gen_pr_review_best_practices_prompt
+from knowledgebase.doc_spec import (
+    gen_pr_review_best_practices_prompt,
+    summary_guideline_prompt,
+)
 
 
 class BestPracticesKnowledgeBase:
@@ -117,6 +120,71 @@ class BestPracticesKnowledgeBase:
                             ),
                         )
                     )
+            except IntegrityError as e:
+                session.rollback()
+                raise ValueError(f"Failed to insert best practice: {e}")
+            except Exception as e:
+                session.rollback()
+                raise e
+
+            session.commit()
+
+        return bp_result
+
+    def add_external_best_practices(
+        self, source_id: str, content: str, commit: bool = True
+    ) -> List[str]:
+        """
+        Generates a best practices for the given content.
+
+        Args:
+            llm_client (LLMInterface): The LLM client to use.
+            namespace (str): The namespace to use.
+            content (str): The content to generate a tag path for.
+
+        Returns:
+            List[str]: A list of tag names from root to leaf.
+        """
+
+        if commit:
+            with SessionLocal() as session:
+                bps = session.query(BestPractice).filter_by(source_id=source_id).all()
+                if bps:
+                    raise ValueError(
+                        f"Best practices already exist for source_id: {source_id}"
+                    )
+
+        prompt = summary_guideline_prompt.format(external_guideline=content)
+
+        # Call LLM to get classification
+        response = self.llm_client.generate(prompt)
+        # Parse the LLM response to extract tag path
+        try:
+            bp_response = extract_json(response)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Failed to parse tag path JSON: {e}")
+
+        bp_result = json.loads(bp_response)
+
+        if not commit:
+            return bp_result
+
+        with SessionLocal() as session:
+            try:
+                tag_path = bp_result.get("tag", None)
+                if tag_path is None:
+                    raise ValueError("Tag path is required.")
+
+                print(f"insert best practice: {bp_result}")
+                session.add(
+                    BestPractice(
+                        id=str(uuid.uuid4()),
+                        tag=tag_path,
+                        source_id=source_id,
+                        guideline=content,
+                        guideline_vec=self.embedding_func(bp_response),
+                    )
+                )
             except IntegrityError as e:
                 session.rollback()
                 raise ValueError(f"Failed to insert best practice: {e}")
