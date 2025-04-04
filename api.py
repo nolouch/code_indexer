@@ -13,6 +13,7 @@ from code_graph.db_manager import GraphDBManager
 from code_graph import create_openai_builder
 from setting.base import DATABASE_URI
 from setting.db import SessionLocal, Base, engine
+from knowledgebase.knowledge_graph import GraphKnowledgeBase
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 llm_client = None
 bp_kb = None
 code_graph_db = None
+tidb_kg = None
 
 try:
     # Initialize database
@@ -87,6 +89,18 @@ try:
         logger.error(f"Error initializing code graph database: {e}")
         logger.error(traceback.format_exc())
 
+    logger.info("Initializing tidb knowledge graph...")
+    try:
+        tidb_kg = GraphKnowledgeBase(
+            llm_client,
+            "tidb_knowledge_graph.entities",
+            "tidb_knowledge_graph.relationships",
+            "tidb_knowledge_graph.chunks",
+        )
+    except Exception as e:
+        logger.error(f"Error initializing code graph database: {e}", exc_info=True)
+
+
 except Exception as e:
     logger.error(f"Error during initialization: {e}")
     logger.error(traceback.format_exc())
@@ -139,6 +153,50 @@ class QueryRequest(BaseModel):
 
 class QueryResponse(BaseModel):
     results: dict = Field(..., description="The search results")
+
+
+@app.get("/tidb_doc", response_model=QueryResponse, tags=["Best Practices"])
+async def query_best_practices(
+    query: str = Query(..., description="The search query for best practices"),
+    top_k: Optional[int] = Query(default=10, description="Top K results to return"),
+    threshold: Optional[float] = Query(
+        default=0.5, description="Similarity score threshold"
+    ),
+):
+    """
+    Accepts a query string and returns relevant best practices from the knowledge base.
+
+    This endpoint finds best practices that match the query semantically.
+
+    Args:
+        query: The search query string
+        top_k: Top K results to return (optional)
+        threshold: Similarity score threshold (optional)
+
+    Returns:
+        A dictionary of best practices relevant to the query.
+    """
+    if llm_client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="LLM client not initialized - AWS credentials may be missing",
+        )
+
+    if tidb_kg is None:
+        raise HTTPException(
+            status_code=503, detail="TiDB Knowledge Graph not initialized"
+        )
+
+    try:
+        with SessionLocal() as session:
+            res = tidb_kg.retrieve_graph_data(session, query, 3)
+        return QueryResponse(results=res.to_dict())
+    except Exception as e:
+        logger.error(f"Error processing query '{query}': {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500, detail=f"Error querying tidb knowledge graph: {str(e)}"
+        )
 
 
 @app.get("/best_practices", response_model=QueryResponse, tags=["Best Practices"])
@@ -203,8 +261,12 @@ class CodeNode(BaseModel):
     file_path: str = Field(..., description="File path containing this node")
     line: int = Field(..., description="Line number in the file")
     similarity: float = Field(..., description="Similarity score to the query")
-    code_content: Optional[str] = Field(None, description="The actual code content of this node")
-    doc_content: Optional[str] = Field(None, description="Documentation content for this node")
+    code_content: Optional[str] = Field(
+        None, description="The actual code content of this node"
+    )
+    doc_content: Optional[str] = Field(
+        None, description="Documentation content for this node"
+    )
 
 
 class CodeSearchResponse(BaseModel):
@@ -238,8 +300,10 @@ async def search_code_graph(request: CodeSearchRequest):
 
     try:
         # Use repository name directly in the search
-        logger.info(f"Executing code search: {request.query}, repository name: {request.repository_name}")
-        
+        logger.info(
+            f"Executing code search: {request.query}, repository name: {request.repository_name}"
+        )
+
         # Execute the search with repository name
         results = code_graph_db.vector_search(
             repo_name=request.repository_name,
@@ -254,11 +318,11 @@ async def search_code_graph(request: CodeSearchRequest):
             # Extract content and documentation
             code_content = result.get("code_context", None)
             doc_content = result.get("doc_context", None)
-            
+
             # Fall back to docstring if doc_context is not available
             if doc_content is None:
                 doc_content = result.get("docstring", None)
-            
+
             node = CodeNode(
                 id=result["id"],
                 name=result["name"],
@@ -267,7 +331,7 @@ async def search_code_graph(request: CodeSearchRequest):
                 line=result["line"],
                 similarity=result["similarity"],
                 code_content=code_content,
-                doc_content=doc_content
+                doc_content=doc_content,
             )
             nodes.append(node)
 
@@ -289,40 +353,52 @@ async def get_repository_stats(
     Get statistics about a code repository stored in the graph database.
 
     This endpoint returns information about the nodes and relationships in the repository.
-    
+
     - **repository_name**: Name of the code repository
-    
+
     Returns:
         Statistics about the repository graph, including node and edge counts.
     """
     if not code_graph_db or not code_graph_db.available:
-        logger.error("Code graph database not initialized or unavailable, cannot get repository stats")
-        raise HTTPException(status_code=503, detail="Code graph database not initialized or unavailable")
+        logger.error(
+            "Code graph database not initialized or unavailable, cannot get repository stats"
+        )
+        raise HTTPException(
+            status_code=503, detail="Code graph database not initialized or unavailable"
+        )
 
     try:
         logger.info(f"Getting repository stats by name: {repository_name}")
-        
-        stats = code_graph_db.get_repository_stats(
-            repository_name=repository_name
-        )
+
+        stats = code_graph_db.get_repository_stats(repository_name=repository_name)
         if not stats:
             logger.warning(f"Repository not found: {repository_name}")
-            raise HTTPException(status_code=404, detail=f"Repository not found: {repository_name}")
+            raise HTTPException(
+                status_code=404, detail=f"Repository not found: {repository_name}"
+            )
         return stats
     except Exception as e:
         logger.error(f"Error getting repository stats: {e}")
         logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Error retrieving repository stats: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error retrieving repository stats: {str(e)}"
+        )
 
 
 # Keep the original endpoint for backward compatibility
-@app.get("/code_graph/repositories/{repository_path}/stats", tags=["Code Graph"], deprecated=True)
-async def get_repository_stats_by_path(repository_path: str = Path(..., description="Path to the code repository")):
+@app.get(
+    "/code_graph/repositories/{repository_path}/stats",
+    tags=["Code Graph"],
+    deprecated=True,
+)
+async def get_repository_stats_by_path(
+    repository_path: str = Path(..., description="Path to the code repository")
+):
     """
     Get statistics about a code repository stored in the graph database, identified by path.
-    
+
     This endpoint is deprecated. Use /code_graph/repositories/stats instead.
-    
+
     - **repository_path**: Path to the code repository
 
     Returns:
@@ -330,8 +406,9 @@ async def get_repository_stats_by_path(repository_path: str = Path(..., descript
     """
     # Extract repository name from path (last part of the path)
     from pathlib import Path as PathLib
+
     repo_name = PathLib(repository_path).name
-    
+
     # Use the repository name to get stats
     return await get_repository_stats(repository_name=repo_name)
 
@@ -458,6 +535,7 @@ async def check_database():
             if "@" in DATABASE_URI
             else "***",
         }
+
 
 # API usage examples
 """
