@@ -4,6 +4,13 @@ from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.types import UserDefinedType
 import numpy as np
 import logging
+import sys
+import os
+
+# 添加项目根目录到路径，以便导入setting模块
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from setting.embedding import EMBEDDING_MODEL, VECTOR_SEARCH, CODE_EMBEDDING_DIM
+from setting.base import DATABASE_URI
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -11,11 +18,11 @@ logger = logging.getLogger(__name__)
 
 Base = declarative_base()
 
-# Default embedding dimension
-EMBEDDING_DIM = 384  # Using the default for sentence-transformers MiniLM model
+# 使用setting中的嵌入维度
+EMBEDDING_DIM = CODE_EMBEDDING_DIM
 
-# Maximum size of each chunk (1MB)
-CHUNK_SIZE = 1 * 1024 * 1024
+# Maximum size of each chunk (64KB)
+CHUNK_SIZE = 64 * 1024
 
 class VECTOR(UserDefinedType):
     """Custom type for TiDB VECTOR data type."""
@@ -92,6 +99,8 @@ class CodeFile(Base):
     # Reduce the length of file_path to stay within TiDB's key length limit
     # MySQL/TiDB has a max key length of 3072 bytes
     file_path = Column(String(768), nullable=False, index=True)  # Reduced from 1024
+    # Repository name
+    repo_name = Column(String(256), nullable=True, index=True)
     # Total file size
     file_size = Column(Integer, nullable=False, default=0)
     # Total number of chunks
@@ -109,6 +118,7 @@ class CodeFile(Base):
     __table_args__ = (
         # Create a non-unique index instead
         Index('idx_file_path', file_path),
+        Index('idx_repo_name', repo_name),
     )
     
     def get_full_content(self):
@@ -173,14 +183,16 @@ def setup_vector_indexes(engine):
     else:
         logger.info("Not using TiDB, skipping vector index creation")
 
-def get_engine(db_path='mysql+pymysql://root@localhost:4000/code_index'):
+def get_engine(db_path=None):
     """Create and return a database engine.
     
     Args:
-        db_path: Database connection string. Default is TiDB.
+        db_path: Database connection string. If None, uses DATABASE_URI from settings.
                For SQLite use: 'sqlite:///file_index.db'
     """
-    return create_engine(db_path)
+    # 优先使用传入的db_path，否则使用设置中的DATABASE_URI
+    connection_string = db_path or DATABASE_URI or 'mysql+pymysql://root@localhost:4000/code_index'
+    return create_engine(connection_string)
 
 def get_session(engine=None):
     """Create and return a session"""
@@ -190,14 +202,66 @@ def get_session(engine=None):
     return Session()
 
 def init_db(engine=None):
-    """Initialize the database, creating tables if they don't exist"""
+    """Initialize the database, creating tables if they don't exist.
+    
+    Args:
+        engine: SQLAlchemy engine. If None, one will be created.
+    """
     if engine is None:
         engine = get_engine()
+    
+    # Create tables if they don't exist
     Base.metadata.create_all(engine)
     
-    # Setup vector indexes for TiDB
-    setup_vector_indexes(engine)
+    # Try to update schema if needed (add repo_name column if it doesn't exist)
+    # This is a safe operation that will only execute if the column doesn't exist
+    try:
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            # Check if repo_name column exists
+            if 'tidb' in str(engine.url) or 'mysql' in str(engine.url):
+                # For MySQL/TiDB
+                result = conn.execute(text("""
+                    SELECT COUNT(*) 
+                    FROM INFORMATION_SCHEMA.COLUMNS 
+                    WHERE TABLE_NAME = 'code_files' AND COLUMN_NAME = 'repo_name'
+                """)).scalar()
+                
+                if result == 0:
+                    # Column doesn't exist, add it
+                    conn.execute(text("""
+                        ALTER TABLE code_files 
+                        ADD COLUMN repo_name VARCHAR(256) NULL,
+                        ADD INDEX idx_repo_name (repo_name)
+                    """))
+                    conn.commit()
+                    logger.info("Added repo_name column to code_files table")
+            elif 'sqlite' in str(engine.url):
+                # For SQLite
+                result = conn.execute(text("""
+                    SELECT COUNT(*) 
+                    FROM pragma_table_info('code_files') 
+                    WHERE name = 'repo_name'
+                """)).scalar()
+                
+                if result == 0:
+                    # Column doesn't exist, add it
+                    conn.execute(text("""
+                        ALTER TABLE code_files 
+                        ADD COLUMN repo_name VARCHAR(256) NULL
+                    """))
+                    conn.commit()
+                    logger.info("Added repo_name column to code_files table")
+    except Exception as e:
+        logger.warning(f"Error updating schema: {e}")
     
+    # Set up vector indexes for TiDB
+    try:
+        setup_vector_indexes(engine)
+    except Exception as e:
+        logger.warning(f"Error setting up vector indexes: {e}")
+        # Continue with non-vector operations
+
 def split_content_into_chunks(content, chunk_size=CHUNK_SIZE):
     """Split content into chunks of specified size
     

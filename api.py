@@ -5,6 +5,7 @@ import numpy as np
 from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, HTTPException, Query, Path
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 
 from knowledgebase.best_practices import BestPracticesKnowledgeBase
 from llm.factory import LLMInterface
@@ -15,6 +16,8 @@ from setting.base import DATABASE_URI
 from setting.db import SessionLocal, Base, engine
 from knowledgebase.knowledge_graph import GraphKnowledgeBase
 from setting.embedding import EMBEDDING_MODEL
+from file_indexer.indexer import CodeIndexer
+from file_indexer.database import CodeFile
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -25,6 +28,7 @@ llm_client = None
 bp_kb = None
 code_graph_db = None
 tidb_kg = None
+file_indexer = None
 
 try:
     # Initialize database
@@ -110,6 +114,14 @@ try:
     except Exception as e:
         logger.error(f"Error initializing code graph database: {e}", exc_info=True)
 
+    # Initialize file indexer
+    logger.info("Initializing file indexer...")
+    try:
+        file_indexer = CodeIndexer(db_path=DATABASE_URI)
+        logger.info("File indexer initialized successfully")
+    except Exception as e:
+        logger.error(f"Error initializing file indexer: {e}", exc_info=True)
+        file_indexer = None
 
 except Exception as e:
     logger.error(f"Error during initialization: {e}")
@@ -128,6 +140,10 @@ app = FastAPI(
         {
             "name": "Code Graph",
             "description": "Operations related to code graph analysis and search",
+        },
+        {
+            "name": "File Indexer",
+            "description": "Operations related to file indexing and search",
         },
     ],
 )
@@ -151,6 +167,7 @@ async def root():
             "llm_client": llm_client is not None,
             "best_practices_kb": bp_kb is not None,
             "code_graph_db": db_status,
+            "file_indexer": file_indexer is not None,
         },
         "docs": "/docs",
     }
@@ -547,6 +564,523 @@ async def check_database():
         }
 
 
+# --- File Indexer Models and Endpoints ---
+class FileIndexerResult(BaseModel):
+    id: int = Field(..., description="File ID")
+    file_path: str = Field(..., description="Path to the file")
+    language: str = Field(..., description="Programming language of the file")
+    repo_name: Optional[str] = Field(None, description="Repository name")
+    similarity: float = Field(..., description="Similarity score to the query")
+    content: Optional[str] = Field(None, description="File content (if requested)")
+
+
+class FileIndexerResponse(BaseModel):
+    results: List[FileIndexerResult] = Field(..., description="List of files matching the query")
+
+
+class FileSearchRequest(BaseModel):
+    query: str = Field(..., description="The search query")
+    limit: int = Field(10, description="Maximum number of results to return")
+    show_content: bool = Field(True, description="Whether to include file content in results")
+    max_chunks: Optional[int] = Field(None, description="Maximum number of chunks to return (None for all chunks)")
+    repository: Optional[str] = Field(None, description="Repository name to filter results")
+
+
+@app.post("/file_indexer/vector_search", response_model=FileIndexerResponse, tags=["File Indexer"])
+async def vector_search_files(request: FileSearchRequest):
+    """
+    Search for files similar to the query text using vector (semantic) search.
+    
+    This endpoint finds files that match the query semantically using TiDB vector search.
+    
+    Args:
+        query: The search query string
+        limit: Maximum number of results to return (default: 10)
+        show_content: Whether to include file content in results (default: True)
+        max_chunks: Maximum number of chunks to return (None for all chunks)
+        repository: Repository name to filter results (optional)
+        
+    Returns:
+        A list of files matching the query, with optional content.
+    """
+    if not file_indexer:
+        raise HTTPException(
+            status_code=503, detail="File indexer not initialized"
+        )
+    
+    try:
+        search_results = file_indexer.search_similar(
+            query_text=request.query,
+            limit=request.limit,
+            show_content=request.show_content,
+            max_chunks=request.max_chunks,
+            repository=request.repository,
+            search_type="vector"
+        )
+        
+        # Convert to response format
+        results = []
+        for file, similarity, content in search_results:
+            results.append(
+                FileIndexerResult(
+                    id=file.id,
+                    file_path=file.file_path,
+                    language=file.language or "unknown",
+                    repo_name=file.repo_name,
+                    similarity=similarity,
+                    content=content if request.show_content else None
+                )
+            )
+        
+        return FileIndexerResponse(results=results)
+    except ValueError as e:
+        # Catch the specific error when TiDB is required for vector search
+        if "requires TiDB" in str(e):
+            raise HTTPException(
+                status_code=400, 
+                detail="Vector search requires TiDB. Current database does not support vector operations. Try using full_text_search endpoint instead."
+            )
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error processing vector search query '{request.query}': {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500, detail=f"Error searching files: {str(e)}"
+        )
+
+
+@app.post("/file_indexer/full_text_search", response_model=FileIndexerResponse, tags=["File Indexer"])
+async def full_text_search_files(request: FileSearchRequest):
+    """
+    Search for files containing the query text using full text search.
+    
+    This endpoint finds files that contain exact matches of the query text using SQL LIKE queries.
+    
+    Args:
+        query: The search query string
+        limit: Maximum number of results to return (default: 10)
+        show_content: Whether to include file content in results (default: True)
+        max_chunks: Maximum number of chunks to return (None for all chunks)
+        repository: Repository name to filter results (optional)
+        
+    Returns:
+        A list of files matching the query, with optional content.
+    """
+    if not file_indexer:
+        raise HTTPException(
+            status_code=503, detail="File indexer not initialized"
+        )
+    
+    print(f"[API] Full text search request: query='{request.query}', limit={request.limit}, repository={request.repository}")
+    
+    try:
+        search_results = file_indexer.search_similar(
+            query_text=request.query,
+            limit=request.limit,
+            show_content=request.show_content,
+            max_chunks=request.max_chunks,
+            repository=request.repository,
+            search_type="full_text"
+        )
+        
+        print(f"[API] Full text search returned {len(search_results)} results")
+        
+        # Convert to response format
+        results = []
+        for file, similarity, content in search_results:
+            results.append(
+                FileIndexerResult(
+                    id=file.id,
+                    file_path=file.file_path,
+                    language=file.language or "unknown",
+                    repo_name=file.repo_name,
+                    similarity=similarity,
+                    content=content if request.show_content else None
+                )
+            )
+        
+        return FileIndexerResponse(results=results)
+    except Exception as e:
+        error_message = f"Error processing full text search query '{request.query}': {e}"
+        logger.error(error_message)
+        logger.error(traceback.format_exc())
+        print(f"[API-ERROR] {error_message}")
+        raise HTTPException(
+            status_code=500, detail=error_message
+        )
+
+
+# Keep the legacy GET endpoint for backward compatibility
+@app.get("/file_indexer/search", response_model=FileIndexerResponse, tags=["File Indexer"], deprecated=True)
+async def search_file_indexer(
+    query: str = Query(..., description="The search query"),
+    limit: Optional[int] = Query(default=10, description="Maximum number of results to return"),
+    show_content: Optional[bool] = Query(default=True, description="Whether to include file content in results"),
+    max_chunks: Optional[int] = Query(default=None, description="Maximum number of chunks to return (None for all chunks)"),
+    repository: Optional[str] = Query(default=None, description="Repository name to filter results"),
+    search_type: Optional[str] = Query(default="vector", description="Type of search to perform", enum=["vector", "full_text"]),
+):
+    """
+    [DEPRECATED] Search for files similar to the query text.
+    
+    This endpoint is deprecated. Please use /file_indexer/vector_search or /file_indexer/full_text_search instead.
+    
+    Args:
+        query: The search query string
+        limit: Maximum number of results to return (default: 10)
+        show_content: Whether to include file content in results (default: True)
+        max_chunks: Maximum number of chunks to return (None for all chunks)
+        repository: Repository name to filter results (optional)
+        search_type: Type of search to perform - "vector" (semantic) or "full_text" (default: "vector")
+        
+    Returns:
+        A list of files matching the query, with optional content.
+    """
+    if not file_indexer:
+        raise HTTPException(
+            status_code=503, detail="File indexer not initialized"
+        )
+    
+    try:
+        search_results = file_indexer.search_similar(
+            query_text=query,
+            limit=limit,
+            show_content=show_content,
+            max_chunks=max_chunks,
+            repository=repository,
+            search_type=search_type
+        )
+        
+        # Convert to response format
+        results = []
+        for file, similarity, content in search_results:
+            results.append(
+                FileIndexerResult(
+                    id=file.id,
+                    file_path=file.file_path,
+                    language=file.language or "unknown",
+                    repo_name=file.repo_name,
+                    similarity=similarity,
+                    content=content if show_content else None
+                )
+            )
+        
+        return FileIndexerResponse(results=results)
+    except ValueError as e:
+        # Catch the specific error when TiDB is required for vector search
+        if "requires TiDB" in str(e) and search_type == "vector":
+            raise HTTPException(
+                status_code=400, 
+                detail="Vector search requires TiDB. Current database does not support vector operations. Try using search_type=full_text instead."
+            )
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error processing file search query '{query}': {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500, detail=f"Error searching files: {str(e)}"
+        )
+
+
+@app.get("/file_indexer/file", tags=["File Indexer"])
+async def get_file_by_path(
+    file_path: str = Query(..., description="Path to the file to retrieve", example="/path/to/file.py"),
+    max_chunks: Optional[int] = Query(default=None, description="Maximum number of chunks to return (None for all chunks)"),
+):
+    """
+    Get the content of a file by its path.
+    
+    This endpoint retrieves the content of a file directly by specifying its path.
+    
+    Args:
+        file_path: The path of the file to retrieve
+        max_chunks: Maximum number of chunks to return (None for all chunks)
+        
+    Returns:
+        File content and metadata.
+    """
+    if not file_indexer:
+        raise HTTPException(
+            status_code=503, detail="File indexer not initialized"
+        )
+    
+    try:
+        # URL decode the file path and clean it
+        import urllib.parse
+        decoded_path = urllib.parse.unquote(file_path)
+        original_path = decoded_path
+        
+        # Remove potential quotes
+        if decoded_path.startswith("'") and decoded_path.endswith("'"):
+            decoded_path = decoded_path[1:-1]
+        elif decoded_path.startswith('"') and decoded_path.endswith('"'):
+            decoded_path = decoded_path[1:-1]
+        
+        # Clean up any trailing spaces in the path
+        decoded_path = decoded_path.strip()
+        
+        print(f"[API] Looking for file with path: {decoded_path}")
+        if original_path != decoded_path:
+            print(f"[API] Original path was: {original_path}")
+        
+        # Try exact match first, then try fuzzy matching if needed
+        with SessionLocal() as session:
+            try:
+                # First check if the file table has data
+                file_count = session.execute(text("SELECT COUNT(*) FROM code_files")).scalar()
+                chunk_count = session.execute(text("SELECT COUNT(*) FROM file_chunks")).scalar()
+                print(f"[API] Database has {file_count} files and {chunk_count} chunks")
+                
+                if file_count == 0:
+                    print("[API-ERROR] The code_files table is empty!")
+                    raise HTTPException(
+                        status_code=500, detail="No files are indexed in the database"
+                    )
+                
+                # Prepare query strategies
+                file = None
+                match_method = ""
+                
+                # 1. Exact match
+                file = session.query(CodeFile).filter_by(file_path=decoded_path).first()
+                if file:
+                    match_method = "exact match"
+                
+                # 2. If not found, try suffix match (handles relative paths)
+                if not file:
+                    suffix_query = f"%{decoded_path}"
+                    print(f"[API-SQL] Trying suffix match: LIKE '{suffix_query}'")
+                    file = session.query(CodeFile).filter(CodeFile.file_path.like(suffix_query)).first()
+                    if file:
+                        match_method = "suffix match"
+                
+                # 3. If still not found, try matching by basename only
+                if not file:
+                    basename = os.path.basename(decoded_path)
+                    if basename:
+                        basename_query = f"%/{basename}"  # Ensure we match the filename, not a part of the path
+                        print(f"[API-SQL] Trying basename match: LIKE '{basename_query}'")
+                        file = session.query(CodeFile).filter(CodeFile.file_path.like(basename_query)).first()
+                        if file:
+                            match_method = "basename match"
+                
+                # 4. Finally try fuzzy match with the basename
+                if not file:
+                    fuzzy_basename = f"%{os.path.basename(decoded_path)}%"
+                    print(f"[API-SQL] Trying fuzzy basename match: LIKE '{fuzzy_basename}'")
+                    candidates = session.query(CodeFile).filter(CodeFile.file_path.like(fuzzy_basename)).all()
+                    if candidates:
+                        # Choose the file with shortest path (usually the most accurate match)
+                        file = min(candidates, key=lambda x: len(x.file_path))
+                        match_method = "fuzzy basename match"
+                
+                if not file:
+                    # If all strategies failed, return 404
+                    print(f"[API-ERROR] File not found after trying all matching strategies: {decoded_path}")
+                    # Print some random samples for diagnostics
+                    sample = session.query(CodeFile).limit(3).all()
+                    if sample:
+                        print("[API] Sample file paths in database:")
+                        for s in sample:
+                            print(f"  - {s.file_path}")
+                    
+                    raise HTTPException(
+                        status_code=404, detail=f"File not found: {decoded_path}"
+                    )
+                
+                print(f"[API] Found file ID {file.id} at path {file.file_path} via {match_method}")
+                
+                # Get file content
+                chunks_query = text("""
+                    SELECT content FROM file_chunks 
+                    WHERE file_id = :file_id
+                    ORDER BY chunk_index
+                    LIMIT :chunk_limit
+                """)
+                
+                # Determine how many chunks to fetch
+                chunks_to_fetch = file.chunks_count
+                if max_chunks is not None and max_chunks < chunks_to_fetch:
+                    chunks_to_fetch = max_chunks
+                
+                # Log the query
+                formatted_query = str(chunks_query).replace(":file_id", str(file.id)).replace(":chunk_limit", str(chunks_to_fetch))
+                print(f"[API-SQL] Chunks query: {formatted_query}")
+                
+                # Get file content
+                full_content = ""
+                
+                # Check if file has chunks
+                if file.chunks_count == 0:
+                    print(f"[API-WARNING] File {file.id} ({file.file_path}) has no chunks")
+                    full_content = "[File has no content chunks]"
+                else:
+                    chunks = session.execute(chunks_query, {
+                        "file_id": file.id, 
+                        "chunk_limit": chunks_to_fetch
+                    })
+                    
+                    chunks_loaded = 0
+                    for chunk in chunks:
+                        full_content += chunk.content
+                        chunks_loaded += 1
+                    
+                    print(f"[API] Loaded {chunks_loaded} chunks for file {file.file_path}")
+                    
+                    # Add truncation notice
+                    if max_chunks is not None and max_chunks < file.chunks_count:
+                        full_content += f"\n\n[Content truncated: showing {max_chunks} of {file.chunks_count} chunks]"
+                
+                # Return file information and content
+                return {
+                    "id": file.id,
+                    "file_path": file.file_path,
+                    "language": file.language or "unknown",
+                    "repo_name": file.repo_name,
+                    "file_size": file.file_size,
+                    "chunks_count": file.chunks_count,
+                    "match_method": match_method,
+                    "content": full_content
+                }
+            except HTTPException:
+                raise
+            except Exception as db_error:
+                error_message = f"Database error while retrieving file '{decoded_path}': {db_error}"
+                logger.error(error_message)
+                print(f"[API-ERROR] {error_message}")
+                raise HTTPException(status_code=500, detail=error_message)
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        error_message = f"Error retrieving file {file_path}: {e}"
+        logger.error(error_message)
+        logger.error(traceback.format_exc())
+        print(f"[API-ERROR] {error_message}")
+        raise HTTPException(
+            status_code=500, detail=error_message
+        )
+
+
+@app.get("/file_indexer/file/{file_id}", tags=["File Indexer"])
+async def get_file_by_id(
+    file_id: int = Path(..., description="ID of the file to retrieve", gt=0),
+    max_chunks: Optional[int] = Query(default=None, description="Maximum number of chunks to return (None for all chunks)"),
+):
+    """
+    Get the content of a file by its ID.
+    
+    This endpoint retrieves the content of a file by its unique ID. This is useful when you've already
+    found a file through search and want to retrieve its content.
+    
+    Args:
+        file_id: The ID of the file to retrieve
+        max_chunks: Maximum number of chunks to return (None for all chunks)
+        
+    Returns:
+        File content and metadata.
+    """
+    if not file_indexer:
+        raise HTTPException(
+            status_code=503, detail="File indexer not initialized"
+        )
+
+    try:
+        with SessionLocal() as session:
+            try:
+                # First check if the file table has data
+                file_count = session.execute(text("SELECT COUNT(*) FROM code_files")).scalar()
+                chunk_count = session.execute(text("SELECT COUNT(*) FROM file_chunks")).scalar()
+                print(f"[API] Database has {file_count} files and {chunk_count} chunks")
+                
+                if file_count == 0:
+                    print("[API-ERROR] The code_files table is empty!")
+                    raise HTTPException(
+                        status_code=500, detail="No files are indexed in the database"
+                    )
+                
+                # Query for the file
+                file = session.query(CodeFile).filter_by(id=file_id).first()
+                if not file:
+                    print(f"[API-ERROR] File with ID {file_id} not found")
+                    raise HTTPException(
+                        status_code=404, detail=f"File with ID {file_id} not found"
+                    )
+                
+                print(f"[API] Found file ID {file_id} at path {file.file_path}")
+                
+                # Get file content
+                chunks_query = text("""
+                    SELECT content FROM file_chunks 
+                    WHERE file_id = :file_id
+                    ORDER BY chunk_index
+                    LIMIT :chunk_limit
+                """)
+                
+                # Determine how many chunks to fetch
+                chunks_to_fetch = file.chunks_count
+                if max_chunks is not None and max_chunks < chunks_to_fetch:
+                    chunks_to_fetch = max_chunks
+                
+                # Log the query
+                formatted_query = str(chunks_query).replace(":file_id", str(file.id)).replace(":chunk_limit", str(chunks_to_fetch))
+                print(f"[API-SQL] Chunks query: {formatted_query}")
+                
+                # Get file content
+                full_content = ""
+                
+                # Check if file has chunks
+                if file.chunks_count == 0:
+                    print(f"[API-WARNING] File {file.id} ({file.file_path}) has no chunks")
+                    full_content = "[File has no content chunks]"
+                else:
+                    chunks = session.execute(chunks_query, {
+                        "file_id": file.id, 
+                        "chunk_limit": chunks_to_fetch
+                    })
+                    
+                    chunks_loaded = 0
+                    for chunk in chunks:
+                        full_content += chunk.content
+                        chunks_loaded += 1
+                    
+                    print(f"[API] Loaded {chunks_loaded} chunks for file {file.file_path}")
+                    
+                    # Add truncation notice
+                    if max_chunks is not None and max_chunks < file.chunks_count:
+                        full_content += f"\n\n[Content truncated: showing {max_chunks} of {file.chunks_count} chunks]"
+                
+                # Return file information and content
+                return {
+                    "id": file.id,
+                    "file_path": file.file_path,
+                    "language": file.language or "unknown",
+                    "repo_name": file.repo_name,
+                    "file_size": file.file_size,
+                    "chunks_count": file.chunks_count,
+                    "content": full_content
+                }
+            except HTTPException:
+                # Re-raise HTTP exceptions
+                raise
+            except Exception as db_error:
+                error_message = f"Database error while retrieving file ID {file_id}: {db_error}"
+                logger.error(error_message)
+                print(f"[API-ERROR] {error_message}")
+                raise HTTPException(status_code=500, detail=error_message)
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        error_message = f"Error retrieving file with ID {file_id}: {e}"
+        logger.error(error_message)
+        logger.error(traceback.format_exc())
+        print(f"[API-ERROR] {error_message}")
+        raise HTTPException(
+            status_code=500, detail=error_message
+        )
+
+
 # API usage examples
 """
 # Curl examples for the API endpoints
@@ -572,4 +1106,47 @@ curl -X GET "http://localhost:8000/db_check"
 
 # Check API status
 curl -X GET "http://localhost:8000/"
+
+# File Indexer API Examples
+
+# Vector search (semantic search)
+curl -X POST "http://localhost:8000/file_indexer/vector_search" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "implement transaction",
+    "limit": 10,
+    "show_content": true,
+    "max_chunks": 2,
+    "repository": "tidb"
+  }'
+
+# Full text search (exact match)
+curl -X POST "http://localhost:8000/file_indexer/full_text_search" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "createTransaction",
+    "limit": 5,
+    "show_content": true,
+    "repository": "tidb"
+  }'
+
+# Legacy GET endpoint (deprecated)
+curl -X GET "http://localhost:8000/file_indexer/search?query=implement%20transaction&search_type=vector" \
+  -H "Accept: application/json"
+
+# Get file content by path
+curl -X GET "http://localhost:8000/file_indexer/file?file_path=%2Fpath%2Fto%2Ffile.py" \
+  -H "Accept: application/json"
+
+# Get file content with limited chunks
+curl -X GET "http://localhost:8000/file_indexer/file?file_path=%2Fpath%2Fto%2Ffile.py&max_chunks=2" \
+  -H "Accept: application/json"
+
+# Get file content by ID
+curl -X GET "http://localhost:8000/file_indexer/file/123" \
+  -H "Accept: application/json"
+
+# Get file content by ID with limited chunks
+curl -X GET "http://localhost:8000/file_indexer/file/123?max_chunks=2" \
+  -H "Accept: application/json"
 """

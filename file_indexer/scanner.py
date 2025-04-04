@@ -6,8 +6,15 @@ import logging
 logger = logging.getLogger(__name__)
 
 class CodeScanner:
-    def __init__(self, extensions=None, ignore_dirs=None, ignore_patterns=None):
-        """Initialize the code scanner with filters"""
+    def __init__(self, extensions=None, ignore_dirs=None, ignore_patterns=None, ignore_tests=False):
+        """Initialize the code scanner with filters
+        
+        Args:
+            extensions: List of file extensions to include
+            ignore_dirs: List of directory names to ignore
+            ignore_patterns: List of file patterns to ignore
+            ignore_tests: Whether to ignore test files and directories
+        """
         # Default code file extensions to index
         self.extensions = extensions or [
             '.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.c', '.cpp', '.h', '.hpp',
@@ -26,6 +33,13 @@ class CodeScanner:
             '*.dll', '*.exe', '*.o', '*.a', '*.lib', '*.class', '*.jar', '*.war',
             '*.log', '*.lock', '*.bak', '*.swp'
         ]
+        
+        # Ignore test files and directories
+        self.ignore_tests = ignore_tests
+        
+        # Test directories and patterns
+        self.test_dirs = ['test', 'tests', 'testing', 'pytest', 'unittest', '__tests__', 'spec']
+        self.test_patterns = ['test_*.py', '*_test.py', '*_test.js', '*_spec.js', '*Test.java', '*Tests.java', '*_spec.rb']
     
     def should_ignore(self, path):
         """Check if a path should be ignored"""
@@ -35,6 +49,17 @@ class CodeScanner:
         for part in path_parts:
             if part in self.ignore_dirs:
                 return True
+        
+        # Check if should ignore tests and any part of the path is in test_dirs
+        if self.ignore_tests:
+            for part in path_parts:
+                if part.lower() in self.test_dirs:
+                    return True
+            
+            # Check if the file matches any test pattern
+            for pattern in self.test_patterns:
+                if fnmatch.fnmatch(path.name, pattern):
+                    return True
         
         # Check if the file matches any ignore pattern
         for pattern in self.ignore_patterns:

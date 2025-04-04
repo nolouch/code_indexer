@@ -7,19 +7,22 @@ import os
 # Add the parent directory to the path to import the embedding module
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from llm.embedding import get_sentence_transformer
+from setting.embedding import EMBEDDING_MODEL, CODE_EMBEDDING_DIM
 
 logger = logging.getLogger(__name__)
 
 class CodeEmbedder:
-    def __init__(self, model_name="all-MiniLM-L6-v2", dim=384):
+    def __init__(self, model_name=None, dim=None):
         """Initialize the code embedder with a specific model
         
         Args:
             model_name: Name of the SentenceTransformer model to use
             dim: Expected embedding dimension
         """
-        self.model = get_sentence_transformer(model_name)
-        self.dimension = dim
+        # 使用setting模块的配置，若未指定则使用默认值
+        self.model_name = model_name or EMBEDDING_MODEL["name"]
+        self.dimension = dim or CODE_EMBEDDING_DIM
+        self.model = get_sentence_transformer(self.model_name)
     
     def generate_embedding(self, code_text):
         """Generate embeddings for a given code text"""
