@@ -178,6 +178,40 @@ Follow these steps:
 The goal is to build a knowledge base that captures both standard good practices and those critical hidden constraints that experienced developers know but aren't obvious to newcomers.
 """
 
+summary_guideline_prompt = """You are an expert at creating searchable summaries of coding best practices. Your task is to transform a detailed guideline into a tagged, concise summary optimized for vector search.
+
+Given this external best practice guideline:
+{external_guideline}
+
+Create a summary with relevant tag in this format:
+```
+{{
+  "tag": "domain/specific_concept",
+  "summary": "Your concise summary here (50-100 words)"
+}}
+```
+
+Guidelines:
+
+For tag:
+- Create a hierarchical tag in the format "domain/specific_concept", example: "proto/stype_guide" or "security/auth"
+- The tag should precisely categorize the guideline
+- Use lowercase with underscores for multi-word concepts within each level
+
+For summary:
+- Include two distinct parts:
+  1. Document Description: A brief overview explaining what the document is about
+  2. Key Concepts: The core technical recommendations and requirements
+- For both parts:
+  - Include specific technologies and methods mentioned
+  - Preserve key technical terms exactly as they appear
+  - Use natural, flowing language that maintains searchability
+- Maintain clear separation between the two parts using "Part 1:" and "Part 2:" labels
+
+Your summary should be detailed enough that a developer could find it when searching for this specific problem, yet concise enough to serve as a quick reference. Focus on technical accuracy and searchability rather than brevity.
+
+Now, generate the reponse in json format with keys tag and summary, surrounding with ```json and```"""
+
 chunk_agument_prompt = """<document>
 {doc_content}
 </document>

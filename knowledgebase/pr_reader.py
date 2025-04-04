@@ -3,6 +3,8 @@ from typing import Dict, List
 import os
 from dataclasses import dataclass
 from datetime import datetime
+import base64
+import re
 
 
 @dataclass
@@ -192,3 +194,49 @@ class GitHubPRReader:
             base_branch=pr_data["base"]["ref"],
             head_branch=pr_data["head"]["ref"],
         )
+
+    def read_github_file(self, github_url):
+        """
+        Read content from a GitHub file URL
+
+        Args:
+            github_url: URL to a GitHub file (like https://github.com/owner/repo/blob/branch/path/to/file)
+
+        Returns:
+            The content of the file as string
+        """
+        # Parse the GitHub URL to extract owner, repo, branch and path
+        pattern = r"https://github.com/([^/]+)/([^/]+)/blob/([^/]+)/(.*)"
+        match = re.match(pattern, github_url)
+
+        if not match:
+            raise ValueError(f"Invalid GitHub URL format: {github_url}")
+
+        owner, repo, branch, path = match.groups()
+
+        # Construct the GitHub API URL
+        api_url = (
+            f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={branch}"
+        )
+
+        # Set up headers with GitHub token if available
+        headers = {}
+        import os
+
+        github_token = os.getenv("GITHUB_TOKEN")
+        if github_token:
+            headers["Authorization"] = f"token {github_token}"
+
+        # Make the API request
+        response = requests.get(api_url, headers=headers)
+
+        if response.status_code != 200:
+            raise Exception(
+                f"Failed to fetch file: {response.status_code} - {response.text}"
+            )
+
+        # Parse the response and decode content
+        data = response.json()
+        content = base64.b64decode(data["content"]).decode("utf-8")
+
+        return content
