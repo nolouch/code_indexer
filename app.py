@@ -21,18 +21,27 @@ def main():
     parser.add_argument('repo_path', help='Path to the code repository to analyze')
     
     # Database options
-    parser.add_argument('--disable-db', action='store_true', help='Disable database operations')
-    parser.add_argument('--db-uri', default=DATABASE_URI, help='Database URI (overrides default)')
+    db_group = parser.add_argument_group('Database options')
+    db_group.add_argument('--disable-db', action='store_true', help='Disable database operations')
+    db_group.add_argument('--db-uri', default=DATABASE_URI, help='Database URI (overrides default)')
     
     # Search options
-    parser.add_argument('--search', '-s', help='Text search query')
-    parser.add_argument('--vector-search', '-v', help='Vector-based semantic search query')
-    parser.add_argument('--use-doc-embedding', action='store_true', help='Use documentation embeddings for search')
-    parser.add_argument('--limit', '-l', type=int, default=10, help='Limit search results')
-    parser.add_argument('--embedding-dim', type=int, default=384, help='Dimension for embeddings')
+    search_group = parser.add_argument_group('Search options')
+    search_group.add_argument('--search', '-s', help='Text search query')
+    search_group.add_argument('--vector-search', '-v', help='Vector-based semantic search query')
+    search_group.add_argument('--use-doc-embedding', action='store_true', help='Use documentation embeddings for search')
+    search_group.add_argument('--limit', '-l', type=int, default=10, help='Limit search results')
+    search_group.add_argument('--embedding-dim', type=int, default=384, help='Dimension for embeddings')
     
     # Output options
-    parser.add_argument('--detailed', '-d', action='store_true', help='Show detailed search results')
+    output_group = parser.add_argument_group('Output options')
+    output_group.add_argument('--detailed', '-d', action='store_true', help='Show detailed search results')
+    
+    # Go language specific options
+    go_group = parser.add_argument_group('Go language options')
+    go_group.add_argument('--go-package', help='Specific Go package name to analyze (e.g. "main")')
+    go_group.add_argument('--exclude-tests', action='store_true', 
+                        help='Exclude test files (files ending with _test.go) from Go analysis')
     
     args = parser.parse_args()
     
@@ -54,7 +63,11 @@ def main():
         if args.vector_search and not args.disable_db:
             # Try to load the repository
             logger.info(f"Loading repository from database: {repo_path}")
-            repository = indexer.load_repository(str(repo_path))
+            repository = indexer.load_repository(
+                str(repo_path),
+                go_package=args.go_package,
+                exclude_tests=args.exclude_tests
+            )
             
             if repository:
                 # Execute vector search
@@ -63,7 +76,9 @@ def main():
                     str(repo_path),
                     args.vector_search,
                     limit=args.limit,
-                    use_doc_embedding=args.use_doc_embedding
+                    use_doc_embedding=args.use_doc_embedding,
+                    go_package=args.go_package,
+                    exclude_tests=args.exclude_tests
                 )
                 
                 if results:
@@ -80,7 +95,11 @@ def main():
         elif args.search:
             # Index the repository if not already indexed
             logger.info(f"Indexing repository: {repo_path}")
-            repository = indexer.index_repository(str(repo_path))
+            repository = indexer.index_repository(
+                str(repo_path),
+                go_package=args.go_package,
+                exclude_tests=args.exclude_tests
+            )
             
             # Execute search (for now this is a placeholder)
             logger.info(f"Searching for: {args.search}")
@@ -89,7 +108,11 @@ def main():
         else:
             # Just index the repository
             logger.info(f"Indexing repository: {repo_path}")
-            repository = indexer.index_repository(str(repo_path))
+            repository = indexer.index_repository(
+                str(repo_path),
+                go_package=args.go_package,
+                exclude_tests=args.exclude_tests
+            )
             
             # Print some stats
             if repository and repository.semantic_graph:

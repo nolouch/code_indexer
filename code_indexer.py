@@ -394,11 +394,13 @@ class CodeIndexer:
         # Initialize graph builder
         self.graph_builder = SemanticGraphBuilder(self.code_embedder, self.doc_embedder)
         
-    def index_repository(self, codebase_path):
+    def index_repository(self, codebase_path, go_package="", exclude_tests=True):
         """Index a repository, analyzing its code and creating a semantic graph.
 
         Args:
             codebase_path (str): Path to the repository to index.
+            go_package (str, optional): Specific Go package name to analyze (e.g. 'main').
+            exclude_tests (bool, optional): Whether to exclude test files (files ending with _test.go) from Go analysis.
 
         Returns:
             Repository: Repository object containing the semantic graph.
@@ -430,7 +432,15 @@ class CodeIndexer:
             # Use parse_directory for GoParser
             if language == 'golang':
                 logger.info(f"Parsing Go repository at: {repo_path}")
-                code_repo = parser.parse_directory(str(repo_path))
+                # Pass language-specific parameters if applicable
+                specific_package = go_package if language == 'golang' else ""
+                
+                logger.info(f"Go parser options - package: {specific_package or 'all'}, exclude tests: {exclude_tests}")
+                code_repo = parser.parse_directory(
+                    str(repo_path),
+                    specific_package=specific_package,
+                    exclude_tests=exclude_tests
+                )
                 logger.debug(f"Parser returned code repository: {type(code_repo)}")
                 
                 if code_repo is None:
@@ -822,11 +832,13 @@ class CodeIndexer:
         logger.info(f"Generated index file with {len(index['nodes'])} nodes and {len(index['edges'])} edges")
         return output_file
     
-    def load_repository(self, repo_path):
+    def load_repository(self, repo_path, go_package="", exclude_tests=True):
         """Load a repository from database.
         
         Args:
             repo_path: Path to the repository
+            go_package (str, optional): Specific Go package name to analyze (e.g. 'main').
+            exclude_tests (bool, optional): Whether to exclude test files (files ending with _test.go) from Go analysis.
             
         Returns:
             Repository object or None if not found
@@ -842,7 +854,10 @@ class CodeIndexer:
             repo_stats = self.db_manager.get_repository_stats(repo_path)
             if not repo_stats:
                 logger.warning(f"Repository not found in database: {repo_path}")
-                return None
+                
+                # If repository not found in the database, try indexing it
+                logger.info(f"Attempting to index repository: {repo_path}")
+                return self.index_repository(repo_path, go_package=go_package, exclude_tests=exclude_tests)
                 
             # Load graph from database
             graph = self.db_manager.load_graph(repo_path)
@@ -868,8 +883,20 @@ class CodeIndexer:
             logger.error(traceback.format_exc())
             return None
     
-    def vector_search(self, repo_path, query, limit=10, use_doc_embedding=False):
-        """Execute vector-based semantic search."""
+    def vector_search(self, repo_path, query, limit=10, use_doc_embedding=False, go_package="", exclude_tests=True):
+        """Execute vector-based semantic search.
+        
+        Args:
+            repo_path: Path to the repository
+            query: Search query
+            limit: Maximum number of results to return
+            use_doc_embedding: Whether to use documentation embeddings
+            go_package: Specific Go package name to analyze (e.g. 'main')
+            exclude_tests: Whether to exclude test files (files ending with _test.go) from Go analysis
+            
+        Returns:
+            Search results or None if not found
+        """
         if self.disable_db or not self.db_manager:
             logger.warning("Database is disabled. Cannot perform vector search.")
             return None
@@ -879,7 +906,7 @@ class CodeIndexer:
         if repo_path in self.repositories:
             repo = self.repositories[repo_path]
         else:
-            repo = self.load_repository(repo_path)
+            repo = self.load_repository(repo_path, go_package=go_package, exclude_tests=exclude_tests)
             
         if not repo:
             logger.warning(f"Repository not found: {repo_path}")
@@ -913,6 +940,11 @@ def main():
     parser.add_argument('--log-level', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], 
                         default='INFO', help='Set the logging level')
     
+    # Go language specific options
+    parser.add_argument('--go-package', help='Specific Go package name to analyze (e.g. "main")')
+    parser.add_argument('--exclude-tests', action='store_true', 
+                        help='Exclude test files (files ending with _test.go) from Go analysis')
+    
     args = parser.parse_args()
     
     # Set up logging level
@@ -937,7 +969,11 @@ def main():
         if args.vector_search and not args.disable_db:
             # Try to load the repository
             logger.info(f"Loading repository from database: {args.codebase}")
-            repository = indexer.load_repository(args.codebase)
+            repository = indexer.load_repository(
+                args.codebase,
+                go_package=args.go_package,
+                exclude_tests=args.exclude_tests
+            )
             
             if repository:
                 # Execute vector search
@@ -946,7 +982,9 @@ def main():
                     args.codebase,
                     args.vector_search,
                     limit=args.limit,
-                    use_doc_embedding=args.use_doc_embedding
+                    use_doc_embedding=args.use_doc_embedding,
+                    go_package=args.go_package,
+                    exclude_tests=args.exclude_tests
                 )
                 
                 if results:
@@ -963,7 +1001,11 @@ def main():
         elif args.search:
             # Index the repository if not already indexed
             logger.info(f"Indexing repository: {args.codebase}")
-            repository = indexer.index_repository(args.codebase)
+            repository = indexer.index_repository(
+                args.codebase,
+                go_package=args.go_package,
+                exclude_tests=args.exclude_tests
+            )
             
             # Execute search
             results = repository.search(args.search)
@@ -980,7 +1022,11 @@ def main():
         else:
             # Just index the repository
             logger.info(f"Indexing repository: {args.codebase}")
-            repository = indexer.index_repository(args.codebase)
+            repository = indexer.index_repository(
+                args.codebase,
+                go_package=args.go_package,
+                exclude_tests=args.exclude_tests
+            )
             
             # Print some stats
             if repository and repository.semantic_graph:

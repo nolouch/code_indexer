@@ -56,8 +56,17 @@ class GoParser(LanguageParser):
             self.initialized = False
             raise
             
-    def parse_directory(self, directory: str) -> CodeRepository:
-        """Parse all Go packages in a directory"""
+    def parse_directory(self, directory: str, specific_package: str = "", exclude_tests: bool = True) -> CodeRepository:
+        """Parse all Go packages in a directory
+        
+        Args:
+            directory: Path to the directory to analyze
+            specific_package: Specific package name to analyze (e.g. 'main')
+            exclude_tests: Whether to exclude test files
+            
+        Returns:
+            CodeRepository object containing all the parsed modules
+        """
         path = Path(directory)
         if not path.exists():
             raise ValueError(f"Directory {directory} does not exist")
@@ -81,7 +90,14 @@ class GoParser(LanguageParser):
         modules_parsed = 0
         for pkg_path in packages:
             try:
-                module = self._parse_package(pkg_path)
+                # Only filter by specific_package if it's provided
+                if specific_package and pkg_path and specific_package not in os.path.basename(pkg_path):
+                    logger.info(f"Skipping package {pkg_path} because it doesn't match specific package {specific_package}")
+                    continue
+                
+                # Parse the package
+                logger.info(f"Parsing package: {pkg_path}")
+                module = self._parse_package(pkg_path, specific_package, exclude_tests)
                 if module:
                     self.repository.modules[pkg_path] = module
                     modules_parsed += 1
@@ -92,6 +108,8 @@ class GoParser(LanguageParser):
                     self.repository.modules[pkg_path] = default_module
             except Exception as e:
                 logger.error(f"Error parsing package {pkg_path}: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
                 # Create a default module on exception
                 default_module = self._create_default_module(pkg_path)
                 self.repository.modules[pkg_path] = default_module
@@ -121,8 +139,17 @@ class GoParser(LanguageParser):
             files=[path]
         )
         
-    def parse_file(self, file_path: str) -> Module:
-        """Parse a single Go file"""
+    def parse_file(self, file_path: str, specific_package: str = "", exclude_tests: bool = True) -> Module:
+        """Parse a single Go file
+        
+        Args:
+            file_path: Path to the Go file
+            specific_package: Specific package name to analyze (e.g. 'main')
+            exclude_tests: Whether to exclude test files
+            
+        Returns:
+            Module object containing the parsed package
+        """
         if not os.path.exists(file_path):
             logger.error(f"File {file_path} does not exist")
             return None
@@ -142,7 +169,7 @@ class GoParser(LanguageParser):
             )
             
         # Use the directory containing the file for parsing
-        module = self._parse_package(str(pkg_dir))
+        module = self._parse_package(str(pkg_dir), specific_package, exclude_tests)
         
         # Add module to repository for dependency analysis
         if module and module.name:
@@ -253,8 +280,17 @@ class GoParser(LanguageParser):
         
         return list(packages)
             
-    def _parse_package(self, package_path: str) -> Module:
-        """Parse a Go package using the AST analyzer"""
+    def _parse_package(self, package_path: str, specific_package: str = "", exclude_tests: bool = True) -> Module:
+        """Parse a Go package using the AST analyzer
+        
+        Args:
+            package_path: Path to the package to analyze
+            specific_package: Specific package name to analyze (e.g. 'main')
+            exclude_tests: Whether to exclude test files
+            
+        Returns:
+            Module object containing the parsed package
+        """
         if not package_path:
             logger.error("Empty package path provided")
             return self._create_default_module("unknown")
@@ -273,6 +309,16 @@ class GoParser(LanguageParser):
         logger.info(f"Parsing {'directory' if is_filesystem_path else 'package'}: {package_path}")
         
         try:
+            # Ensure package_path is properly escaped 
+            if package_path and not isinstance(package_path, str):
+                package_path = str(package_path)
+                
+            # Ensure specific_package is properly processed
+            if specific_package is None:
+                specific_package = ""
+            if not isinstance(specific_package, str):
+                specific_package = str(specific_package)
+                
             # Prepare command line arguments
             cmd = [str(self.ast_tool_path)]
             
@@ -292,6 +338,20 @@ class GoParser(LanguageParser):
                     # Use the pkg parameter as a fallback, though it may not work correctly
                     cmd.extend(["-pkg", package_path])
                     logger.debug(f"Using package mode with path: {package_path}")
+            
+            # Add specific package parameter if provided
+            if specific_package and specific_package.strip():
+                # Use -package to match the Go AST analyzer flag
+                cmd.extend(["-package", specific_package.strip()])
+                logger.debug(f"Filtering for specific package: {specific_package.strip()}")
+                
+            # Add exclude-tests parameter based on the flag
+            if exclude_tests:
+                cmd.append("-exclude-tests")
+                logger.debug("Excluding test files from analysis")
+            else:
+                cmd.append("-exclude-tests=false")
+                logger.debug("Including test files in analysis")
                 
             # Run the AST analyzer with proper Go environment
             env = os.environ.copy()
@@ -311,6 +371,9 @@ class GoParser(LanguageParser):
             if result.returncode != 0:
                 logger.warning(f"AST analyzer failed with code {result.returncode}: {result.stderr}")
                 logger.debug(f"Command: {' '.join(cmd)}")
+                # Log additional error details to help debugging
+                logger.debug(f"Command output: {result.stdout[:500]}")
+                logger.debug(f"Working directory: {os.getcwd()}")
                 return self._create_default_module(package_path)
                 
             # If output is empty, package may not have been found
@@ -332,11 +395,14 @@ class GoParser(LanguageParser):
             except json.JSONDecodeError as e:
                 logger.error(f"Invalid JSON from AST analyzer: {e}")
                 logger.debug(f"JSON snippet: {result.stdout[:200]}...")
+                if result.stdout:
+                    logger.debug(f"Command output first 500 chars: {result.stdout[:500]}")
+                    logger.debug(f"Command output last 500 chars: {result.stdout[-500:] if len(result.stdout) > 500 else result.stdout}")
                 return self._create_default_module(package_path)
                 
             # Check if there is package data
-            if not ast_data:
-                logger.warning(f"No packages found in {package_path}")
+            if not isinstance(ast_data, dict) or not ast_data:
+                logger.warning(f"AST data is not a valid dictionary or is empty: {type(ast_data)}")
                 return self._create_default_module(package_path)
                 
             # Get the first package information
@@ -349,16 +415,19 @@ class GoParser(LanguageParser):
                     return self._create_default_module(package_path)
                 
                 # For a package path, we need to look for the specific package
-                if not is_filesystem_path and "." in package_path:
+                if not is_filesystem_path and package_path and "." in package_path:
                     # See if we can find the package by name
                     pkg_path = None
                     for key in ast_data.keys():
-                        if key.endswith(package_path) or package_path.endswith(key):
+                        # Safe comparison only if both values are not None and are strings
+                        if (key and package_path and 
+                            (key.endswith(package_path) or package_path.endswith(key))):
                             pkg_path = key
                             break
                     
                     if not pkg_path:
                         logger.warning(f"Package {package_path} not found in AST data")
+                        logger.debug(f"Available keys: {list(ast_data.keys())}")
                         # Still try with first package as fallback
                         if ast_data:
                             pkg_path = next(iter(ast_data))
@@ -384,9 +453,9 @@ class GoParser(LanguageParser):
                 
                 # Create module object even if package has no files
                 # Instead of returning None, create a minimal module
-                module_name = pkg_info.get("name", os.path.basename(package_path))
+                module_name = pkg_info.get("name")
                 if not module_name:
-                    module_name = os.path.basename(package_path)
+                    module_name = os.path.basename(package_path) if package_path else "unknown"
                 
                 # Ensure "files" is a list
                 files_list = pkg_info.get("files", [])

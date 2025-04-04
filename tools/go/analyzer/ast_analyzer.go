@@ -67,12 +67,14 @@ func main() {
 	pkgPath := flag.String("pkg", ".", "package path to analyze")
 	dirPath := flag.String("dir", "", "directory path to analyze")
 	outputFile := flag.String("output", "", "output JSON file")
+	specificPackage := flag.String("package", "", "specific package name to analyze (e.g. 'main')")
+	excludeTests := flag.Bool("exclude-tests", false, "exclude test files (files ending with _test.go)")
 	flag.Parse()
 
 	cfg := &packages.Config{
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedSyntax |
 			packages.NeedTypes | packages.NeedTypesInfo | packages.NeedDeps,
-		Tests: false,
+		Tests: !*excludeTests,
 	}
 
 	var pkgs []*packages.Package
@@ -111,7 +113,7 @@ func main() {
 	// Check if we need to process files directly (if package loading failed or returned empty)
 	if len(pkgs) == 0 || (len(pkgs) > 0 && len(pkgs[0].Syntax) == 0) {
 		// Try to process files directly
-		result := processDirectFiles(*dirPath)
+		result := processDirectFiles(*dirPath, *specificPackage, *excludeTests)
 
 		// Output the result
 		output, _ := json.MarshalIndent(result, "", "  ")
@@ -122,6 +124,12 @@ func main() {
 	result := make(map[string]PackageInfo)
 
 	for _, pkg := range pkgs {
+		// Skip if we're looking for a specific package and this isn't it
+		if *specificPackage != "" && pkg.Name != *specificPackage {
+			fmt.Println("Ignoring package", pkg.Name)
+			continue
+		}
+
 		if pkg.Errors != nil {
 			fmt.Fprintf(os.Stderr, "Package %s has errors: %v\n", pkg.PkgPath, pkg.Errors)
 			// Continue anyway with as much information as we have
@@ -133,8 +141,25 @@ func main() {
 			Files: pkg.GoFiles,
 		}
 
+		// Filter out test files if requested
+		if *excludeTests {
+			var filteredFiles []string
+			for _, file := range pkgInfo.Files {
+				if !strings.HasSuffix(file, "_test.go") {
+					filteredFiles = append(filteredFiles, file)
+				}
+			}
+			pkgInfo.Files = filteredFiles
+		}
+
 		// Get imports
 		for _, f := range pkg.Syntax {
+			// Skip test files if requested
+			filename := pkg.Fset.Position(f.Pos()).Filename
+			if *excludeTests && strings.HasSuffix(filename, "_test.go") {
+				continue
+			}
+
 			for _, imp := range f.Imports {
 				impPath := strings.Trim(imp.Path.Value, "\"")
 				if !contains(pkgInfo.Imports, impPath) {
@@ -148,6 +173,12 @@ func main() {
 
 		// Analyze package contents
 		for _, f := range pkg.Syntax {
+			// Skip test files if requested
+			filename := pkg.Fset.Position(f.Pos()).Filename
+			if *excludeTests && strings.HasSuffix(filename, "_test.go") {
+				continue
+			}
+
 			ast.Inspect(f, func(n ast.Node) bool {
 				switch node := n.(type) {
 				case *ast.FuncDecl:
@@ -200,7 +231,7 @@ func main() {
 	// Ensure we have at least one package in the result
 	if len(result) == 0 {
 		// Process files directly as a fallback
-		result = processDirectFiles(*dirPath)
+		result = processDirectFiles(*dirPath, *specificPackage, *excludeTests)
 	}
 
 	// Output results
@@ -222,7 +253,7 @@ func main() {
 }
 
 // Function to process files directly, used when package loading fails
-func processDirectFiles(dirPath string) map[string]PackageInfo {
+func processDirectFiles(dirPath string, specificPackage string, excludeTests bool) map[string]PackageInfo {
 	result := make(map[string]PackageInfo)
 
 	// Default package info
@@ -237,15 +268,28 @@ func processDirectFiles(dirPath string) map[string]PackageInfo {
 		entries, err := os.ReadDir(dirPath)
 		if err == nil {
 			for _, entry := range entries {
-				if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".go") && !strings.HasSuffix(entry.Name(), "_test.go") {
+				if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".go") {
+					// Skip test files if requested
+					if excludeTests && strings.HasSuffix(entry.Name(), "_test.go") {
+						continue
+					}
+
 					filePath := filepath.Join(dirPath, entry.Name())
 					goFiles = append(goFiles, filePath)
 
-					// Process this file
-					processGoFile(filePath, &pkgInfo)
+					// Process this file to get the package name
+					// Check for nil or empty specific package
+					if specificPackage == "" || (pkgInfo.Name != "" && pkgInfo.Name == specificPackage) {
+						processGoFile(filePath, &pkgInfo)
+					}
 				}
 			}
 		}
+	}
+
+	// If a specific package is requested but not found, return empty result
+	if specificPackage != "" && pkgInfo.Name != specificPackage {
+		return result
 	}
 
 	pkgInfo.Files = goFiles

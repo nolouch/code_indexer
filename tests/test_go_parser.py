@@ -83,7 +83,19 @@ func CreatePerson(name string, age int, address string) *Person {
             returncode=0
         )
 
+        # Test with default parameters
         module = self.parser.parse_file(self.test_file)
+        self.assertEqual(module.name, "main")
+        
+        # Create a new mock for testing with specific parameters
+        specific_mock = Mock(
+            stdout='{"main":{"name":"main","path":"main","files":["test.go"],"imports":["fmt","strings"],"functions":[{"name":"CreatePerson","package":"main","file":"test.go","line":31,"docstring":"CreatePerson creates a new person with the given information","calls":[]}],"structs":[{"name":"Person","package":"main","file":"test.go","line":9,"docstring":"Person represents a person with basic information","fields":[{"name":"Name","type":"string","tag":"json:\\"name\\""},{"name":"Age","type":"int","tag":"json:\\"age\\""},{"name":"Address","type":"string","tag":"json:\\"address\\""}],"methods":["Greet","SetName"]}],"interfaces":[{"name":"Greeter","package":"main","file":"test.go","line":16,"docstring":"Greeter defines the greeting behavior","methods":["Greet","SetName"]}]}}',
+            returncode=0
+        )
+        mock_run.return_value = specific_mock
+        
+        # Test with specific parameters
+        module = self.parser.parse_file(self.test_file, specific_package="main", exclude_tests=False)
 
         # Verify module
         self.assertEqual(module.name, "main")
@@ -109,6 +121,12 @@ func CreatePerson(name string, age int, address string) *Person {
         self.assertEqual(iface.name, "Greeter")
         self.assertEqual(iface.docstring, "Greeter defines the greeting behavior")
         self.assertEqual(len(iface.methods), 2)
+        
+        # Verify that correct command parameters were passed
+        args = mock_run.call_args[0][0]
+        self.assertIn("-package", args)
+        self.assertIn("main", args)
+        self.assertIn("-exclude-tests=false", args)
 
     def test_get_dependencies(self):
         # Create test module with dependencies
@@ -156,6 +174,34 @@ func CreatePerson(name string, age int, address string) *Person {
         struct = module.classes[0]
         struct_deps = self.parser.get_dependencies(struct)
         self.assertIn("Greeter", [d.name for d in struct_deps["implements"]])
+
+    @patch("subprocess.run")
+    @patch("parsers.go.parser.GoParser._get_packages")
+    def test_parse_directory(self, mock_get_packages, mock_run):
+        # Mock packages list
+        mock_get_packages.return_value = [self.test_dir]
+        
+        # Mock AST analyzer output
+        mock_run.return_value = Mock(
+            stdout='{"main":{"name":"main","path":"main","files":["test.go"],"imports":["fmt","strings"],"functions":[{"name":"CreatePerson","package":"main","file":"test.go","line":31,"docstring":"CreatePerson creates a new person with the given information","calls":[]}],"structs":[{"name":"Person","package":"main","file":"test.go","line":9,"docstring":"Person represents a person with basic information","fields":[{"name":"Name","type":"string","tag":"json:\\"name\\""},{"name":"Age","type":"int","tag":"json:\\"age\\""},{"name":"Address","type":"string","tag":"json:\\"address\\""}],"methods":["Greet","SetName"]}],"interfaces":[{"name":"Greeter","package":"main","file":"test.go","line":16,"docstring":"Greeter defines the greeting behavior","methods":["Greet","SetName"]}]}}',
+            returncode=0
+        )
+        
+        # Test with default parameters
+        repo = self.parser.parse_directory(self.test_dir)
+        self.assertIsNotNone(repo)
+        self.assertEqual(len(repo.modules), 1)
+        
+        # Test with specific parameters
+        repo = self.parser.parse_directory(self.test_dir, specific_package="main", exclude_tests=False)
+        self.assertIsNotNone(repo)
+        self.assertEqual(len(repo.modules), 1)
+        
+        # Verify correct command parameters were passed
+        args = mock_run.call_args[0][0]
+        self.assertIn("-package", args)
+        self.assertIn("main", args)
+        self.assertIn("-exclude-tests=false", args)
 
 if __name__ == '__main__':
     unittest.main() 
