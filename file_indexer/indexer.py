@@ -564,7 +564,7 @@ class CodeIndexer:
             chunks_limit = max(limit * 5, 100)  # Get at least 100 chunks or 5x the limit
             
             chunk_query = text("""
-                SELECT c.id AS chunk_id, c.file_id, c.chunk_index
+                SELECT  /*+ read_from_storage(tiflash[c]) */ c.id AS chunk_id, c.file_id, c.chunk_index
                 FROM file_chunks c
                 WHERE fts_match_word(:query_text, c.content)
                 ORDER BY fts_match_word(:query_text, c.content) DESC, c.id
@@ -654,7 +654,7 @@ class CodeIndexer:
                         if show_content:
                             # Get the matching chunks for this file - ordered by relevance then chunk_index
                             content_query = text("""
-                                SELECT c.id, c.content, c.chunk_index
+                                SELECT  /*+ read_from_storage(tiflash[c]) */ c.id, c.content, c.chunk_index
                                 FROM file_chunks c
                                 WHERE c.file_id = :file_id AND fts_match_word(:query_text, c.content)
                                 ORDER BY fts_match_word(:query_text, c.content) DESC, c.chunk_index
