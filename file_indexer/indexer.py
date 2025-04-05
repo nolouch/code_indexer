@@ -328,7 +328,7 @@ class CodeIndexer:
             logger.error(f"Database error for file {file_path}: {e}")
             raise
     
-    def search_similar(self, query_text, limit=None, show_content=True, repository=None, search_type="vector"):
+    def search_similar(self, query_text, limit=None, show_content=True, repository=None, search_type="vector", max_lines=600):
         """Search for files similar to the query text
         
         Args:
@@ -337,6 +337,7 @@ class CodeIndexer:
             show_content: Whether to include file content in results
             repository: Optional repository name to filter results
             search_type: Type of search to perform ("vector" or "full_text")
+            max_lines: Maximum number of lines to show per file (default: 600)
         """
         if not query_text:
             return []
@@ -350,7 +351,8 @@ class CodeIndexer:
                 query_text, 
                 limit=limit,
                 show_content=show_content,
-                repository=repository
+                repository=repository,
+                max_lines=max_lines
             )
             
         try:
@@ -363,7 +365,8 @@ class CodeIndexer:
                     query_embedding, 
                     limit=limit,
                     show_content=show_content,
-                    repository=repository
+                    repository=repository,
+                    max_lines=max_lines
                 )
             else:
                 raise ValueError("Vector search requires TiDB. Current database does not support vector operations.")
@@ -372,7 +375,7 @@ class CodeIndexer:
             logger.error(f"Error searching: {e}")
             return []
     
-    def _tidb_vector_search(self, query_embedding, limit=10, show_content=True, repository=None):
+    def _tidb_vector_search(self, query_embedding, limit=10, show_content=True, repository=None, max_lines=600):
         """Use TiDB's native vector search capability
         
         Args:
@@ -380,6 +383,7 @@ class CodeIndexer:
             limit: Maximum number of results to return
             show_content: Whether to include file content in results
             repository: Optional repository name to filter results
+            max_lines: Maximum number of lines to show per file
         """
         # Convert embedding to TiDB vector format
         query_vector = self.embedder.embedding_to_tidb_vector(query_embedding)
@@ -417,30 +421,79 @@ class CodeIndexer:
                     id=row.id,
                     file_path=row.file_path,
                     language=row.language,
-                    repo_name=row.repo_name
+                    repo_name=row.repo_name,
+                    chunks_count=row.chunks_count
                 )
                 
                 file_content = ""
                 
                 if show_content:
-                    # Determine how many chunks to fetch
-                    chunks_to_fetch = row.chunks_count
+                    # Get the average number of lines per chunk in this file
+                    avg_lines_per_chunk = 100  # Default fallback value
+                    if hasattr(row, 'line_count') and row.line_count is not None and row.chunks_count > 0:
+                        avg_lines_per_chunk = row.line_count / row.chunks_count
+                    
+                    # Calculate how many chunks we need to fetch to get approximately max_lines
+                    chunks_needed = int(max_lines / avg_lines_per_chunk) + 1 if avg_lines_per_chunk > 0 else 5
+                    
+                    # Limit the chunks to fetch
+                    chunks_to_fetch = min(chunks_needed, row.chunks_count)
                     
                     # Construct chunks query with limit if needed
                     chunks_query = text("""
-                        SELECT content FROM file_chunks 
+                        SELECT content, line_range, start_line, end_line FROM file_chunks 
                         WHERE file_id = :file_id
                         ORDER BY chunk_index
                         LIMIT :chunk_limit
                     """)
                     
                     # Get chunks content for this file
+                    start_chunk_line = None
+                    end_chunk_line = None
+                    
                     for chunk_row in conn.execute(chunks_query, {
                         "file_id": row.id, 
                         "chunk_limit": chunks_to_fetch
                     }):
                         file_content += chunk_row.content
+                        
+                        # Try to extract line range information if available
+                        if hasattr(chunk_row, 'start_line') and chunk_row.start_line:
+                            if start_chunk_line is None or chunk_row.start_line < start_chunk_line:
+                                start_chunk_line = chunk_row.start_line
+                                
+                        if hasattr(chunk_row, 'end_line') and chunk_row.end_line:
+                            if end_chunk_line is None or chunk_row.end_line > end_chunk_line:
+                                end_chunk_line = chunk_row.end_line
                     
+                    # Add line range info to the file object if it was found in chunks
+                    if start_chunk_line is not None:
+                        file.start_line = start_chunk_line
+                    if end_chunk_line is not None:
+                        file.end_line = end_chunk_line
+                        
+                    # Add indication if content is truncated
+                    # If more lines than requested, add a note
+                    if end_chunk_line - start_chunk_line + 1 > max_lines:
+                        file_content += f"\n\n[Content truncated: showing approximately {max_lines} lines. File has {row.line_count or 'unknown'} total lines]"
+                    # If chunks were limited, add a note
+                    elif chunks_to_fetch < row.chunks_count:
+                        total_lines = row.line_count or 'unknown'
+                        file_content += f"\n\n[Content truncated: showing {chunks_to_fetch} of {row.chunks_count} chunks, approximately {end_chunk_line - start_chunk_line + 1} lines out of {total_lines} total]"
+                
+                # Try to fetch LLM comments if they exist
+                try:
+                    llm_comments_query = text("""
+                        SELECT llm_comments FROM code_files 
+                        WHERE id = :file_id AND llm_comments IS NOT NULL
+                    """)
+                    
+                    llm_comments_result = conn.execute(llm_comments_query, {"file_id": row.id}).first()
+                    if llm_comments_result and llm_comments_result.llm_comments:
+                        file.llm_comments = llm_comments_result.llm_comments
+                except Exception as e:
+                    logger.error(f"Error fetching LLM comments for file {row.id}: {e}")
+                
                 similarity = 1.0 - float(row.score)  # Convert distance to similarity
                 results.append((file, similarity, file_content))
                 
@@ -450,7 +503,7 @@ class CodeIndexer:
         """Close the database session"""
         self.session.close() 
     
-    def search_full_text(self, query_text, limit=10, show_content=True, repository=None):
+    def search_full_text(self, query_text, limit=10, show_content=True, repository=None, max_lines=600):
         """Search for files containing the query text using full text search
         
         Args:
@@ -458,6 +511,7 @@ class CodeIndexer:
             limit: Maximum number of results to return
             show_content: Whether to include file content in results
             repository: Optional repository name to filter results
+            max_lines: Maximum number of lines to show per file
         """
         try:
             # First check if tables have data
@@ -501,7 +555,8 @@ class CodeIndexer:
                     query_text,
                     limit=limit,
                     show_content=show_content,
-                    repository=repository
+                    repository=repository,
+                    max_lines=max_lines
                 )
             else:
                 # Fallback to LIKE-based search
@@ -555,24 +610,35 @@ class CodeIndexer:
                                 id=row.id,
                                 file_path=row.file_path,
                                 language=row.language,
-                                repo_name=row.repo_name
+                                repo_name=row.repo_name,
+                                chunks_count=row.chunks_count
                             )
                             
                             file_content = ""
+                            start_chunk_line = None
+                            end_chunk_line = None
                             
                             if show_content:
+                                # Get the average number of lines per chunk in this file
+                                avg_lines_per_chunk = 100  # Default fallback value
+                                if hasattr(file, 'line_count') and file.line_count is not None and file.chunks_count > 0:
+                                    avg_lines_per_chunk = file.line_count / file.chunks_count
+                                
+                                # Calculate how many chunks we need to fetch to get approximately max_lines
+                                chunks_needed = int(max_lines / avg_lines_per_chunk) + 1 if avg_lines_per_chunk > 0 else 5
+                                
+                                # Limit the chunks to fetch
+                                chunks_to_fetch = min(chunks_needed, file.chunks_count)
+                                
                                 # Prioritize chunks that match the query
                                 chunks_query = text("""
-                                    SELECT content, chunk_index FROM file_chunks 
+                                    SELECT content, line_range, start_line, end_line, chunk_index FROM file_chunks 
                                     WHERE file_id = :file_id
                                     ORDER BY 
                                         CASE WHEN content LIKE :query_pattern THEN 0 ELSE 1 END,
                                         chunk_index
                                     LIMIT :chunk_limit
                                 """)
-                                
-                                # Determine how many chunks to fetch
-                                chunks_to_fetch = row.chunks_count
                                 
                                 # Execute chunks query without too much logging
                                 chunks_params = {
@@ -599,12 +665,45 @@ class CodeIndexer:
                                     
                                     for chunk_row in chunk_results:
                                         file_content += chunk_row.content
+                                        
+                                        # Try to extract line range information if available
+                                        if hasattr(chunk_row, 'start_line') and chunk_row.start_line:
+                                            if start_chunk_line is None or chunk_row.start_line < start_chunk_line:
+                                                start_chunk_line = chunk_row.start_line
+                                                
+                                        if hasattr(chunk_row, 'end_line') and chunk_row.end_line:
+                                            if end_chunk_line is None or chunk_row.end_line > end_chunk_line:
+                                                end_chunk_line = chunk_row.end_line
                                     
                                     # Add indication if content is truncated
-                                    if chunks_to_fetch < row.chunks_count:
-                                        file_content += f"\n\n[Content truncated: showing {chunks_to_fetch} of {row.chunks_count} chunks]"
+                                    # If more lines than requested, add a note
+                                    if end_chunk_line - start_chunk_line + 1 > max_lines:
+                                        file_content += f"\n\n[Content truncated: showing approximately {max_lines} lines. File has {file.line_count or 'unknown'} total lines]"
+                                    # If chunks were limited, add a note
+                                    elif chunks_to_fetch < file.chunks_count:
+                                        total_lines = file.line_count or 'unknown'
+                                        file_content += f"\n\n[Content truncated: showing {chunks_to_fetch} of {file.chunks_count} chunks, approximately {end_chunk_line - start_chunk_line + 1} lines out of {total_lines} total]"
                                 except Exception as chunk_error:
-                                    print(f"[ERROR] Failed to retrieve chunks for file ID {row.id}: {chunk_error}")
+                                    print(f"[ERROR] Failed to retrieve chunks for file ID {file.id}: {chunk_error}")
+                            
+                            # Add line range info to the file object if it was found in chunks
+                            if start_chunk_line is not None:
+                                file.start_line = start_chunk_line
+                            if end_chunk_line is not None:
+                                file.end_line = end_chunk_line
+                                
+                            # Try to fetch LLM comments if they exist
+                            try:
+                                llm_comments_query = text("""
+                                    SELECT llm_comments FROM code_files 
+                                    WHERE id = :file_id AND llm_comments IS NOT NULL
+                                """)
+                                
+                                llm_comments_result = conn.execute(llm_comments_query, {"file_id": row.id}).first()
+                                if llm_comments_result and llm_comments_result.llm_comments:
+                                    file.llm_comments = llm_comments_result.llm_comments
+                            except Exception as e:
+                                logger.error(f"Error fetching LLM comments for file {row.id}: {e}")
                             
                             # For full text search, we don't have a meaningful similarity score
                             # Just use 1.0 to indicate a match
@@ -622,7 +721,7 @@ class CodeIndexer:
             print(f"[ERROR] Exception in full text search: {e}")
             return []
 
-    def _tidb_fulltext_search(self, query_text, limit=10, show_content=True, repository=None):
+    def _tidb_fulltext_search(self, query_text, limit=10, show_content=True, repository=None, max_lines=600):
         """Perform two-step full-text search using TiDB's fts_match_word function
         
         This implementation uses a more efficient two-step approach:
@@ -634,6 +733,7 @@ class CodeIndexer:
             limit: Maximum number of results to return
             show_content: Whether to include file content in results
             repository: Optional repository name to filter results
+            max_lines: Maximum number of lines to show per file
         """
         print(f"[INFO] Using optimized TiDB FULLTEXT search with query: {query_text}")
         
@@ -729,21 +829,26 @@ class CodeIndexer:
                         )
                         
                         file_content = ""
+                        start_chunk_line = None
+                        end_chunk_line = None
                         
                         if show_content:
                             # Get the matching chunks for this file - ordered by relevance then chunk_index
                             content_query = text("""
-                                SELECT  /*+ read_from_storage(tiflash[c]) */ c.id, c.content, c.chunk_index
+                                SELECT  /*+ read_from_storage(tiflash[c]) */ c.id, c.content, c.chunk_index, c.start_line, c.end_line
                                 FROM file_chunks c
                                 WHERE c.file_id = :file_id AND fts_match_word(:query_text, c.content)
                                 ORDER BY fts_match_word(:query_text, c.content) DESC, c.chunk_index
                                 LIMIT :chunk_limit
                             """)
                             
+                            # Use max_lines parameter if provided
+                            chunks_limit = max_lines if max_lines and max_lines < file_info.chunks_count else limit
+                            
                             content_params = {
                                 "file_id": file_id,
                                 "query_text": query_text,
-                                "chunk_limit": limit
+                                "chunk_limit": chunks_limit
                             }
                             
                             # Get content for matching chunks
@@ -751,10 +856,43 @@ class CodeIndexer:
                             
                             for content_row in content_results:
                                 file_content += content_row.content
+                                
+                                # Try to extract line range information if available
+                                if hasattr(content_row, 'start_line') and content_row.start_line:
+                                    if start_chunk_line is None or content_row.start_line < start_chunk_line:
+                                        start_chunk_line = content_row.start_line
+                                        
+                                if hasattr(content_row, 'end_line') and content_row.end_line:
+                                    if end_chunk_line is None or content_row.end_line > end_chunk_line:
+                                        end_chunk_line = content_row.end_line
                             
                             # Add indication if content is truncated
-                            if limit < file_info.chunks_count:
-                                file_content += f"\n\n[Content truncated: showing {limit} chunks with search term out of {file_info.chunks_count} total chunks]"
+                            # If more lines than requested, add a note
+                            if end_chunk_line - start_chunk_line + 1 > max_lines:
+                                file_content += f"\n\n[Content truncated: showing approximately {max_lines} lines. File has {file_info.line_count or 'unknown'} total lines]"
+                            # If chunks were limited, add a note
+                            elif chunks_limit < file_info.chunks_count:
+                                total_lines = file_info.line_count or 'unknown'
+                                file_content += f"\n\n[Content truncated: showing {chunks_limit} of {file_info.chunks_count} chunks with search term]"
+                        
+                        # Add line range info to the file object if it was found in chunks
+                        if start_chunk_line is not None:
+                            file.start_line = start_chunk_line
+                        if end_chunk_line is not None:
+                            file.end_line = end_chunk_line
+                            
+                        # Try to fetch LLM comments if they exist
+                        try:
+                            llm_comments_query = text("""
+                                SELECT llm_comments FROM code_files 
+                                WHERE id = :file_id AND llm_comments IS NOT NULL
+                            """)
+                            
+                            llm_comments_result = conn.execute(llm_comments_query, {"file_id": file_id}).first()
+                            if llm_comments_result and llm_comments_result.llm_comments:
+                                file.llm_comments = llm_comments_result.llm_comments
+                        except Exception as e:
+                            logger.error(f"Error fetching LLM comments for file {file_id}: {e}")
                         
                         # Use fixed score of 1.0
                         results.append((file, 1.0, file_content))

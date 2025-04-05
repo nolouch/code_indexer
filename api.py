@@ -640,6 +640,10 @@ class FileIndexerResult(BaseModel):
     repo_name: Optional[str] = Field(None, description="Repository name")
     similarity: float = Field(..., description="Similarity score to the query")
     content: Optional[str] = Field(None, description="File content (if requested)")
+    start_line: Optional[int] = Field(None, description="Starting line number (1-indexed)")
+    end_line: Optional[int] = Field(None, description="Ending line number (inclusive)")
+    line_range: Optional[str] = Field(None, description="Line range in format 'start-end'")
+    llm_comments: Optional[str] = Field(None, description="LLM-generated comments about the code")
 
 
 class FileIndexerResponse(BaseModel):
@@ -651,6 +655,8 @@ class FileSearchRequest(BaseModel):
     limit: int = Field(10, description="Maximum number of results to return")
     show_content: bool = Field(True, description="Whether to include file content in results")
     repository: Optional[str] = Field(None, description="Repository name to filter results")
+    show_comments: bool = Field(True, description="Whether to include LLM-generated comments in results")
+    max_lines: int = Field(600, description="Maximum number of lines to show per file")
 
 
 @app.post("/file_indexer/vector_search", response_model=FileIndexerResponse, tags=["File Indexer"])
@@ -665,6 +671,8 @@ async def vector_search_files(request: FileSearchRequest):
         limit: Maximum number of results to return (default: 10)
         show_content: Whether to include file content in results (default: True)
         repository: Repository name to filter results (optional)
+        show_comments: Whether to include LLM-generated comments in results (default: True)
+        max_lines: Maximum number of lines to show per file (default: 600)
         
     Returns:
         A list of files matching the query, with optional content.
@@ -680,12 +688,54 @@ async def vector_search_files(request: FileSearchRequest):
             limit=request.limit,
             show_content=request.show_content,
             repository=request.repository,
-            search_type="vector"
+            search_type="vector",
+            max_lines=request.max_lines
         )
         
         # Convert to response format
         results = []
         for file, similarity, content in search_results:
+            # Extract line range information from chunks if available
+            start_line = None
+            end_line = None
+            line_range = None
+            
+            # Get LLM comments if requested and available
+            llm_comments = None
+            if request.show_comments and hasattr(file, 'llm_comments') and file.llm_comments:
+                llm_comments = file.llm_comments
+            
+            # If content has chunks, try to extract line range info
+            if content and "LINES:" in content:
+                try:
+                    # Find line range markers in the content
+                    lines_markers = [l for l in content.split('\n') if l.startswith("LINES:")]
+                    if lines_markers:
+                        # Get the first and last line markers
+                        first_marker = lines_markers[0]
+                        last_marker = lines_markers[-1]
+                        
+                        # Extract line numbers
+                        first_range = first_marker.split("LINES:")[1].strip()
+                        last_range = last_marker.split("LINES:")[1].strip()
+                        
+                        first_start, _ = first_range.split('-')
+                        _, last_end = last_range.split('-')
+                        
+                        start_line = int(first_start)
+                        end_line = int(last_end)
+                        line_range = f"{start_line}-{end_line}"
+                except Exception as e:
+                    print(f"[API-WARNING] Error extracting line range from content: {e}")
+            
+            # Use database fields for line information if available
+            if hasattr(file, 'start_line') and file.start_line:
+                start_line = file.start_line
+            if hasattr(file, 'end_line') and file.end_line:
+                end_line = file.end_line
+            if start_line and end_line:
+                line_range = f"{start_line}-{end_line}"
+            
             results.append(
                 FileIndexerResult(
                     id=file.id,
@@ -693,7 +743,11 @@ async def vector_search_files(request: FileSearchRequest):
                     language=file.language or "unknown",
                     repo_name=file.repo_name,
                     similarity=similarity,
-                    content=content if request.show_content else None
+                    content=content if request.show_content else None,
+                    start_line=start_line,
+                    end_line=end_line,
+                    line_range=line_range,
+                    llm_comments=llm_comments
                 )
             )
         
@@ -726,6 +780,8 @@ async def full_text_search_files(request: FileSearchRequest):
         limit: Maximum number of results to return (default: 10)
         show_content: Whether to include file content in results (default: True)
         repository: Repository name to filter results (optional)
+        show_comments: Whether to include LLM-generated comments in results (default: True)
+        max_lines: Maximum number of lines to show per file (default: 600)
         
     Returns:
         A list of files matching the query, with optional content.
@@ -743,7 +799,8 @@ async def full_text_search_files(request: FileSearchRequest):
             limit=request.limit,
             show_content=request.show_content,
             repository=request.repository,
-            search_type="full_text"
+            search_type="full_text",
+            max_lines=request.max_lines
         )
         
         print(f"[API] Full text search returned {len(search_results)} results")
@@ -751,6 +808,47 @@ async def full_text_search_files(request: FileSearchRequest):
         # Convert to response format
         results = []
         for file, similarity, content in search_results:
+            # Extract line range information from chunks if available
+            start_line = None
+            end_line = None
+            line_range = None
+            
+            # Get LLM comments if requested and available
+            llm_comments = None
+            if request.show_comments and hasattr(file, 'llm_comments') and file.llm_comments:
+                llm_comments = file.llm_comments
+            
+            # If content has chunks, try to extract line range info
+            if content and "LINES:" in content:
+                try:
+                    # Find line range markers in the content
+                    lines_markers = [l for l in content.split('\n') if l.startswith("LINES:")]
+                    if lines_markers:
+                        # Get the first and last line markers
+                        first_marker = lines_markers[0]
+                        last_marker = lines_markers[-1]
+                        
+                        # Extract line numbers
+                        first_range = first_marker.split("LINES:")[1].strip()
+                        last_range = last_marker.split("LINES:")[1].strip()
+                        
+                        first_start, _ = first_range.split('-')
+                        _, last_end = last_range.split('-')
+                        
+                        start_line = int(first_start)
+                        end_line = int(last_end)
+                        line_range = f"{start_line}-{end_line}"
+                except Exception as e:
+                    print(f"[API-WARNING] Error extracting line range from content: {e}")
+            
+            # Use database fields for line information if available
+            if hasattr(file, 'start_line') and file.start_line:
+                start_line = file.start_line
+            if hasattr(file, 'end_line') and file.end_line:
+                end_line = file.end_line
+            if start_line and end_line:
+                line_range = f"{start_line}-{end_line}"
+            
             results.append(
                 FileIndexerResult(
                     id=file.id,
@@ -758,7 +856,11 @@ async def full_text_search_files(request: FileSearchRequest):
                     language=file.language or "unknown",
                     repo_name=file.repo_name,
                     similarity=similarity,
-                    content=content if request.show_content else None
+                    content=content if request.show_content else None,
+                    start_line=start_line,
+                    end_line=end_line,
+                    line_range=line_range,
+                    llm_comments=llm_comments
                 )
             )
         
@@ -780,6 +882,8 @@ async def search_file_indexer(
     show_content: Optional[bool] = Query(default=True, description="Whether to include file content in results"),
     repository: Optional[str] = Query(default=None, description="Repository name to filter results"),
     search_type: Optional[str] = Query(default="vector", description="Type of search to perform", enum=["vector", "full_text"]),
+    show_comments: Optional[bool] = Query(default=True, description="Whether to include LLM-generated comments in results"),
+    max_lines: Optional[int] = Query(default=600, description="Maximum number of lines to show per file"),
 ):
     """
     [DEPRECATED] Search for files similar to the query text.
@@ -792,6 +896,8 @@ async def search_file_indexer(
         show_content: Whether to include file content in results (default: True)
         repository: Repository name to filter results (optional)
         search_type: Type of search to perform - "vector" (semantic) or "full_text" (default: "vector")
+        show_comments: Whether to include LLM-generated comments in results (default: True)
+        max_lines: Maximum number of lines to show per file (default: 600)
         
     Returns:
         A list of files matching the query, with optional content.
@@ -807,12 +913,54 @@ async def search_file_indexer(
             limit=limit,
             show_content=show_content,
             repository=repository,
-            search_type=search_type
+            search_type=search_type,
+            max_lines=max_lines
         )
         
         # Convert to response format
         results = []
         for file, similarity, content in search_results:
+            # Extract line range information from chunks if available
+            start_line = None
+            end_line = None
+            line_range = None
+            
+            # Get LLM comments if requested and available
+            llm_comments = None
+            if show_comments and hasattr(file, 'llm_comments') and file.llm_comments:
+                llm_comments = file.llm_comments
+            
+            # If content has chunks, try to extract line range info
+            if content and "LINES:" in content:
+                try:
+                    # Find line range markers in the content
+                    lines_markers = [l for l in content.split('\n') if l.startswith("LINES:")]
+                    if lines_markers:
+                        # Get the first and last line markers
+                        first_marker = lines_markers[0]
+                        last_marker = lines_markers[-1]
+                        
+                        # Extract line numbers
+                        first_range = first_marker.split("LINES:")[1].strip()
+                        last_range = last_marker.split("LINES:")[1].strip()
+                        
+                        first_start, _ = first_range.split('-')
+                        _, last_end = last_range.split('-')
+                        
+                        start_line = int(first_start)
+                        end_line = int(last_end)
+                        line_range = f"{start_line}-{end_line}"
+                except Exception as e:
+                    print(f"[API-WARNING] Error extracting line range from content: {e}")
+            
+            # Use database fields for line information if available
+            if hasattr(file, 'start_line') and file.start_line:
+                start_line = file.start_line
+            if hasattr(file, 'end_line') and file.end_line:
+                end_line = file.end_line
+            if start_line and end_line:
+                line_range = f"{start_line}-{end_line}"
+            
             results.append(
                 FileIndexerResult(
                     id=file.id,
@@ -820,7 +968,11 @@ async def search_file_indexer(
                     language=file.language or "unknown",
                     repo_name=file.repo_name,
                     similarity=similarity,
-                    content=content if show_content else None
+                    content=content if show_content else None,
+                    start_line=start_line,
+                    end_line=end_line,
+                    line_range=line_range,
+                    llm_comments=llm_comments
                 )
             )
         
@@ -1221,7 +1373,9 @@ curl -X POST "http://localhost:8000/file_indexer/vector_search" \
     "query": "implement transaction",
     "limit": 10,
     "show_content": true,
-    "repository": "tidb"
+    "repository": "tidb",
+    "show_comments": true,
+    "max_lines": 600
   }'
 
 # Full text search (exact match)
@@ -1231,7 +1385,9 @@ curl -X POST "http://localhost:8000/file_indexer/full_text_search" \
     "query": "createTransaction",
     "limit": 5,
     "show_content": true,
-    "repository": "tidb"
+    "repository": "tidb",
+    "show_comments": true,
+    "max_lines": 1000
   }'
 
 # Legacy GET endpoint (deprecated)
