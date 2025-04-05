@@ -743,3 +743,92 @@ class GraphDBManager:
                 'node_types': node_types,
                 'relation_types': relation_types
             }
+
+    def save_graph_edges(self, graph: nx.MultiDiGraph, repo_path: str):
+        """Save only the edges from a graph to database.
+        
+        Args:
+            graph: Graph containing edges to save
+            repo_path: Path to the repository
+        """
+        if not self.available:
+            logger.warning("Database is not available, cannot save edges")
+            return
+            
+        with SessionLocal() as session:
+            # Get repository ID
+            repo = self._get_or_create_repository(session, repo_path)
+            repo_id = repo.id
+            
+            # Create a node ID mapping from node_id to database ID
+            node_id_map = {}
+            for node_id in graph.nodes():
+                node_str_id = str(node_id)
+                # Look up the node's database ID
+                db_node = session.query(Node).filter(
+                    Node.repository_id == repo_id,
+                    Node.node_id == node_str_id
+                ).first()
+                
+                if db_node:
+                    node_id_map[node_str_id] = db_node.id
+            
+            # Process edges
+            edges_count = 0
+            edges_skipped = 0
+            
+            for source_id, target_id, attrs in graph.edges(data=True):
+                try:
+                    source_str_id = str(source_id)
+                    target_str_id = str(target_id)
+                    
+                    # Skip if either source or target is not in the database
+                    if source_str_id not in node_id_map or target_str_id not in node_id_map:
+                        logger.debug(f"Skipping edge from {source_str_id} to {target_str_id} - nodes not found in database")
+                        edges_skipped += 1
+                        continue
+                    
+                    # Get database IDs
+                    source_db_id = node_id_map[source_str_id]
+                    target_db_id = node_id_map[target_str_id]
+                    
+                    # Get relationship attributes
+                    relation_type = attrs.get('type', 'unknown')
+                    label = attrs.get('label', '')
+                    
+                    # Check if edge already exists
+                    existing_edge = session.query(Edge).filter(
+                        Edge.repository_id == repo_id,
+                        Edge.source_id == source_db_id,
+                        Edge.target_id == target_db_id,
+                        Edge.relation_type == relation_type
+                    ).first()
+                    
+                    if existing_edge:
+                        # Update existing edge
+                        existing_edge.label = label
+                    else:
+                        # Insert new edge
+                        new_edge = Edge(
+                            repository_id=repo_id,
+                            source_id=source_db_id,
+                            target_id=target_db_id,
+                            relation_type=relation_type,
+                            label=label
+                        )
+                        session.add(new_edge)
+                        edges_count += 1
+                
+                except Exception as e:
+                    logger.error(f"Error processing edge: {e}")
+                    logger.error(f"Source: {source_id}, Target: {target_id}")
+                    edges_skipped += 1
+            
+            # Commit changes and update repository stats
+            session.commit()
+            
+            # Update repository edge count
+            repo.edges_count = session.query(Edge).filter(Edge.repository_id == repo_id).count()
+            session.commit()
+            
+            logger.info(f"Added {edges_count} edges, skipped {edges_skipped} edges")

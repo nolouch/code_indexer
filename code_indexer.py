@@ -393,7 +393,7 @@ class CodeIndexer:
         self.doc_embedder = DocEmbedder(embedding_dim)
         
         # Initialize graph builder
-        self.graph_builder = SemanticGraphBuilder(self.code_embedder, self.doc_embedder)
+        self.graph_builder = SemanticGraphBuilder(self.code_embedder, self.doc_embedder, db_manager=self.db_manager)
         
     def index_repository(self, codebase_path, go_package="", exclude_tests=True):
         """Index a repository, analyzing its code and creating a semantic graph.
@@ -457,7 +457,7 @@ class CodeIndexer:
                 
                 # Convert to semantic graph using the builder
                 logger.info("Converting to semantic graph...")
-                semantic_graph = self.graph_builder.build_from_repository(code_repo)
+                semantic_graph = self.graph_builder.build_from_repository(code_repo, str(repo_path), True)
             else:
                 # For other parsers that might use a different method
                 raise ValueError(f"Parsing for language {language} is not implemented")

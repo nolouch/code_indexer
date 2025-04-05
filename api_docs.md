@@ -387,11 +387,7 @@ curl -X GET "http://localhost:8000/db_check"
 
 1. **Use specific queries** for better results
 2. **Prefer vector search** for conceptual searches
-   - Use `/file_indexer/vector_search` for file content
-   - Use `/code_graph/search` for code elements
 3. **Use full-text search** for exact keyword matches
-   - Use `/file_indexer/full_text_search` for file content
-   - Use `/code_graph/full_text_search` for code elements
 4. **Filter by repository** to narrow down results
 5. **Use pagination** for large files by setting `offset` and `sibling_chunk_num`
 
@@ -423,29 +419,4 @@ curl -X POST "http://localhost:8000/file_indexer/full_text_search" \
 
 # Step 2: Get the complete file using the ID from search results
 curl -X GET "http://localhost:8000/file_indexer/file/42"
-```
-
-### Finding Code Elements
-
-1. Search for code elements using either vector or full-text search based on your needs
-2. Use vector search for conceptual matches and full-text search for exact text matches
-
-```bash
-# Vector search for conceptual matches
-curl -X POST "http://localhost:8000/code_graph/search" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "implement transaction",
-    "repository_name": "tidb",
-    "limit": 5
-  }'
-
-# Full-text search for exact matches
-curl -X POST "http://localhost:8000/code_graph/full_text_search" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "createTransaction",
-    "repository_name": "tidb",
-    "limit": 5
-  }'
 ``` 
