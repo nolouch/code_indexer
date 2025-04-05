@@ -21,9 +21,6 @@ Base = declarative_base()
 # 使用setting中的嵌入维度
 EMBEDDING_DIM = CODE_EMBEDDING_DIM
 
-# Maximum size of each chunk (2KB)
-CHUNK_SIZE = 2 * 1024
-
 class VECTOR(UserDefinedType):
     """Custom type for TiDB VECTOR data type."""
     
@@ -105,6 +102,8 @@ class CodeFile(Base):
     file_size = Column(Integer, nullable=False, default=0)
     # Total number of chunks
     chunks_count = Column(Integer, nullable=False, default=0)
+    # Total number of lines
+    line_count = Column(Integer, nullable=False, default=0)
     # File language
     language = Column(String(50), nullable=True)
     # Use TiDB vector data type for embedding
@@ -144,6 +143,12 @@ class FileChunk(Base):
     chunk_index = Column(Integer, nullable=False)
     # Chunk content
     content = Column(LONGTEXT, nullable=False)
+    # Starting line number (1-indexed)
+    start_line = Column(Integer, nullable=False, default=1)
+    # Ending line number (inclusive)
+    end_line = Column(Integer, nullable=False, default=1)
+    # Line range info
+    line_range = Column(String(50), nullable=True)
     
     # Relationship with file
     file = relationship("CodeFile", back_populates="chunks")
@@ -151,6 +156,8 @@ class FileChunk(Base):
     __table_args__ = (
         # Ensure file ID and chunk index combination is unique
         Index('idx_file_chunk', file_id, chunk_index, unique=True),
+        # Index for line-based lookups
+        Index('idx_file_lines', file_id, start_line, end_line),
     )
 
 def setup_vector_indexes(engine):
@@ -280,6 +287,41 @@ def init_db(engine=None):
                     conn.commit()
                     logger.info("Added comments_embedding column to code_files table")
                 
+                # Check if line_count column exists
+                result = conn.execute(text("""
+                    SELECT COUNT(*) 
+                    FROM INFORMATION_SCHEMA.COLUMNS 
+                    WHERE TABLE_NAME = 'code_files' AND COLUMN_NAME = 'line_count'
+                """)).scalar()
+                
+                if result == 0:
+                    # Column doesn't exist, add it
+                    conn.execute(text("""
+                        ALTER TABLE code_files 
+                        ADD COLUMN line_count INTEGER NOT NULL DEFAULT 0
+                    """))
+                    conn.commit()
+                    logger.info("Added line_count column to code_files table")
+                
+                # Check if file_chunks table has the line range columns
+                result = conn.execute(text("""
+                    SELECT COUNT(*) 
+                    FROM INFORMATION_SCHEMA.COLUMNS 
+                    WHERE TABLE_NAME = 'file_chunks' AND COLUMN_NAME = 'start_line'
+                """)).scalar()
+                
+                if result == 0:
+                    # Add line range columns
+                    conn.execute(text("""
+                        ALTER TABLE file_chunks 
+                        ADD COLUMN start_line INTEGER NOT NULL DEFAULT 1,
+                        ADD COLUMN end_line INTEGER NOT NULL DEFAULT 1,
+                        ADD COLUMN line_range VARCHAR(50) NULL,
+                        ADD INDEX idx_file_lines (file_id, start_line, end_line)
+                    """))
+                    conn.commit()
+                    logger.info("Added line range columns to file_chunks table")
+                
             elif 'sqlite' in str(engine.url):
                 # For SQLite
                 result = conn.execute(text("""
@@ -329,6 +371,69 @@ def init_db(engine=None):
                     """))
                     conn.commit()
                     logger.info("Added comments_embedding column to code_files table")
+                
+                # Check if line_count column exists
+                result = conn.execute(text("""
+                    SELECT COUNT(*) 
+                    FROM pragma_table_info('code_files') 
+                    WHERE name = 'line_count'
+                """)).scalar()
+                
+                if result == 0:
+                    # Column doesn't exist, add it
+                    conn.execute(text("""
+                        ALTER TABLE code_files 
+                        ADD COLUMN line_count INTEGER NOT NULL DEFAULT 0
+                    """))
+                    conn.commit()
+                    logger.info("Added line_count column to code_files table")
+                
+                # Check if file_chunks table has the line range columns
+                # SQLite requires adding columns one at a time
+                result = conn.execute(text("""
+                    SELECT COUNT(*) 
+                    FROM pragma_table_info('file_chunks') 
+                    WHERE name = 'start_line'
+                """)).scalar()
+                
+                if result == 0:
+                    # Add start_line column
+                    conn.execute(text("""
+                        ALTER TABLE file_chunks 
+                        ADD COLUMN start_line INTEGER NOT NULL DEFAULT 1
+                    """))
+                    conn.commit()
+                    logger.info("Added start_line column to file_chunks table")
+                
+                result = conn.execute(text("""
+                    SELECT COUNT(*) 
+                    FROM pragma_table_info('file_chunks') 
+                    WHERE name = 'end_line'
+                """)).scalar()
+                
+                if result == 0:
+                    # Add end_line column
+                    conn.execute(text("""
+                        ALTER TABLE file_chunks 
+                        ADD COLUMN end_line INTEGER NOT NULL DEFAULT 1
+                    """))
+                    conn.commit()
+                    logger.info("Added end_line column to file_chunks table")
+                
+                result = conn.execute(text("""
+                    SELECT COUNT(*) 
+                    FROM pragma_table_info('file_chunks') 
+                    WHERE name = 'line_range'
+                """)).scalar()
+                
+                if result == 0:
+                    # Add line_range column
+                    conn.execute(text("""
+                        ALTER TABLE file_chunks 
+                        ADD COLUMN line_range VARCHAR(50) NULL
+                    """))
+                    conn.commit()
+                    logger.info("Added line_range column to file_chunks table")
     except Exception as e:
         logger.warning(f"Error updating schema: {e}")
     
@@ -339,26 +444,30 @@ def init_db(engine=None):
         logger.warning(f"Error setting up vector indexes: {e}")
         # Continue with non-vector operations
 
-def split_content_into_chunks(content, chunk_size=CHUNK_SIZE):
-    """Split content into chunks of specified size
+def split_content_into_chunks(content, lines_per_chunk=200):
+    """Split content into chunks of specified number of lines
     
     Args:
         content: File content
-        chunk_size: Maximum size of each chunk (bytes)
+        lines_per_chunk: Maximum number of lines per chunk
         
     Returns:
-        List containing all content chunks
+        Tuple containing: (List of content chunks, total line count)
     """
+    lines = content.splitlines(keepends=True)
+    total_lines = len(lines)
     chunks = []
-    content_length = len(content)
     
     # Calculate how many chunks are needed
-    num_chunks = (content_length + chunk_size - 1) // chunk_size
+    num_chunks = (total_lines + lines_per_chunk - 1) // lines_per_chunk
     
     for i in range(num_chunks):
-        start = i * chunk_size
-        end = min((i + 1) * chunk_size, content_length)
-        chunk = content[start:end]
-        chunks.append(chunk)
+        start_line = i * lines_per_chunk
+        end_line = min((i + 1) * lines_per_chunk, total_lines)
+        chunk_lines = lines[start_line:end_line]
+        chunk = ''.join(chunk_lines)
+        # Store line range metadata in the chunk content
+        line_range = f"LINES:{start_line+1}-{end_line}"
+        chunks.append((chunk, line_range, start_line+1, end_line))
     
-    return chunks 
+    return chunks, total_lines 

@@ -15,7 +15,6 @@ from setting.fileindexer_llm import (
 
 # Use absolute import
 from file_indexer.indexer import CodeIndexer
-from file_indexer.database import CHUNK_SIZE
 
 def main():
     parser = argparse.ArgumentParser(description='Index code files into a database with vector search')
@@ -39,8 +38,8 @@ def main():
                            help='Skip generating LLM comments for code')
     index_parser.add_argument('--model', default=default_model,
                             help=f'Embedding model to use (default: {default_model})')
-    index_parser.add_argument('--chunk-size', type=int, default=CHUNK_SIZE,
-                            help=f'Chunk size for large files in bytes (default: {CHUNK_SIZE} bytes)')
+    index_parser.add_argument('--chunk-size', type=int, default=200,
+                            help=f'Chunk size in lines (default: 200 lines)')
     index_parser.add_argument('--ignore-tests', action='store_true',
                             help='Ignore test files and directories')
     index_parser.add_argument('--repo-name', type=str, default=None,

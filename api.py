@@ -650,7 +650,6 @@ class FileSearchRequest(BaseModel):
     query: str = Field(..., description="The search query")
     limit: int = Field(10, description="Maximum number of results to return")
     show_content: bool = Field(True, description="Whether to include file content in results")
-    sibling_chunk_num: Optional[int] = Field(1, description="Number of sibling chunks to include around each match (default: 1)")
     repository: Optional[str] = Field(None, description="Repository name to filter results")
 
 
@@ -665,7 +664,6 @@ async def vector_search_files(request: FileSearchRequest):
         query: The search query string
         limit: Maximum number of results to return (default: 10)
         show_content: Whether to include file content in results (default: True)
-        sibling_chunk_num: Number of sibling chunks to include around each match (default: 1)
         repository: Repository name to filter results (optional)
         
     Returns:
@@ -681,7 +679,6 @@ async def vector_search_files(request: FileSearchRequest):
             query_text=request.query,
             limit=request.limit,
             show_content=request.show_content,
-            sibling_chunk_num=request.sibling_chunk_num,
             repository=request.repository,
             search_type="vector"
         )
@@ -728,7 +725,6 @@ async def full_text_search_files(request: FileSearchRequest):
         query: The search query string
         limit: Maximum number of results to return (default: 10)
         show_content: Whether to include file content in results (default: True)
-        sibling_chunk_num: Number of sibling chunks to include around each match (default: 1)
         repository: Repository name to filter results (optional)
         
     Returns:
@@ -746,7 +742,6 @@ async def full_text_search_files(request: FileSearchRequest):
             query_text=request.query,
             limit=request.limit,
             show_content=request.show_content,
-            sibling_chunk_num=request.sibling_chunk_num,
             repository=request.repository,
             search_type="full_text"
         )
@@ -778,13 +773,11 @@ async def full_text_search_files(request: FileSearchRequest):
         )
 
 
-# Keep the legacy GET endpoint for backward compatibility
 @app.get("/file_indexer/search", response_model=FileIndexerResponse, tags=["File Indexer"], deprecated=True)
 async def search_file_indexer(
     query: str = Query(..., description="The search query"),
     limit: Optional[int] = Query(default=10, description="Maximum number of results to return"),
     show_content: Optional[bool] = Query(default=True, description="Whether to include file content in results"),
-    sibling_chunk_num: Optional[int] = Query(default=1, description="Number of sibling chunks to include around each match (default: 1)"),
     repository: Optional[str] = Query(default=None, description="Repository name to filter results"),
     search_type: Optional[str] = Query(default="vector", description="Type of search to perform", enum=["vector", "full_text"]),
 ):
@@ -797,7 +790,6 @@ async def search_file_indexer(
         query: The search query string
         limit: Maximum number of results to return (default: 10)
         show_content: Whether to include file content in results (default: True)
-        sibling_chunk_num: Number of sibling chunks to include around each match (default: 1)
         repository: Repository name to filter results (optional)
         search_type: Type of search to perform - "vector" (semantic) or "full_text" (default: "vector")
         
@@ -814,7 +806,6 @@ async def search_file_indexer(
             query_text=query,
             limit=limit,
             show_content=show_content,
-            sibling_chunk_num=sibling_chunk_num,
             repository=repository,
             search_type=search_type
         )
@@ -853,18 +844,21 @@ async def search_file_indexer(
 @app.get("/file_indexer/file", tags=["File Indexer"])
 async def get_file_by_path(
     file_path: str = Query(..., description="Path to the file to retrieve", example="/path/to/file.py"),
-    sibling_chunk_num: Optional[int] = Query(default=1, description="Number of sibling chunks to include around each match (default: 1)"),
-    offset: int = Query(default=0, description="Chunk offset for pagination (0-based)", ge=0),
+    start_line: Optional[int] = Query(default=None, description="Starting line number (1-indexed)", ge=1),
+    end_line: Optional[int] = Query(default=None, description="Ending line number (inclusive)", ge=1),
+    lines: Optional[str] = Query(default=None, description="Line range in format 'start-end' (e.g. '10-20')"),
 ):
     """
     Get the content of a file by its path.
     
     This endpoint retrieves the content of a file directly by specifying its path.
+    The file path can be a complete path or a suffix part of the path.
     
     Args:
-        file_path: The path of the file to retrieve
-        sibling_chunk_num: Number of sibling chunks to include around each match (default: 1)
-        offset: Chunk offset for pagination (0-based)
+        file_path: The path of the file to retrieve (can be a path suffix)
+        start_line: Starting line number to retrieve (1-indexed)
+        end_line: Ending line number to retrieve (inclusive)
+        lines: Line range in format 'start-end' (alternative to start_line and end_line)
         
     Returns:
         File content and metadata.
@@ -960,91 +954,209 @@ async def get_file_by_path(
                 
                 print(f"[API] Found file ID {file.id} at path {file.file_path} via {match_method}")
                 
-                # Validate offset
-                if offset >= file.chunks_count:
-                    if file.chunks_count > 0:
+                # Determine line range
+                file_has_line_count = hasattr(file, 'line_count') and file.line_count > 0
+                
+                # Parse line range from different parameter options
+                if lines:
+                    try:
+                        line_range_parts = lines.split('-')
+                        if len(line_range_parts) == 2:
+                            start_line = int(line_range_parts[0])
+                            end_line = int(line_range_parts[1])
+                        else:
+                            raise HTTPException(
+                                status_code=400, detail=f"Invalid line range format: {lines}. Should be 'start-end'"
+                            )
+                    except ValueError:
+                        raise HTTPException(
+                            status_code=400, detail=f"Invalid line range numbers: {lines}"
+                        )
+                
+                # Use default values if only one boundary is specified
+                if start_line is None:
+                    start_line = 1
+                
+                # Default to showing 600 lines if end_line is not specified
+                if end_line is None:
+                    end_line = start_line + 599
+                
+                print(f"[API] Using line range: {start_line}-{end_line}")
+                
+                # Check if file has line_count attribute and validate line range
+                if file_has_line_count:
+                    if start_line > file.line_count:
                         raise HTTPException(
                             status_code=400, 
-                            detail=f"Invalid offset: {offset}. File has {file.chunks_count} chunks (0-{file.chunks_count-1})"
+                            detail=f"Start line {start_line} exceeds file line count {file.line_count}"
                         )
-                    else:
-                        # If the file has no chunks, we'll handle it below
-                        offset = 0
+                    
+                    if end_line > file.line_count:
+                        print(f"[API] End line {end_line} exceeds file line count {file.line_count}, adjusting")
+                        end_line = file.line_count
                 
-                # Get file content with pagination
+                # Default logic for handling missing line count information
+                if not file_has_line_count:
+                    print(f"[API-WARNING] File does not have line_count attribute, attempting to retrieve content by chunks")
+                    
+                    # Check if file has chunks
+                    if file.chunks_count == 0:
+                        print(f"[API-WARNING] File {file.id} ({file.file_path}) has no chunks")
+                        return {
+                            "id": file.id,
+                            "file_path": file.file_path,
+                            "language": file.language or "unknown",
+                            "repo_name": file.repo_name,
+                            "file_size": file.file_size,
+                            "match_method": match_method,
+                            "content": "[File has no content chunks]",
+                            "error": "File does not have line count information and no chunks are available"
+                        }
+                    
+                    # Get all chunks and count lines
+                    all_chunks_query = text("""
+                        SELECT content FROM file_chunks 
+                        WHERE file_id = :file_id
+                        ORDER BY chunk_index
+                    """)
+                    
+                    chunks = session.execute(all_chunks_query, {"file_id": file.id})
+                    all_content = ""
+                    for chunk in chunks:
+                        all_content += chunk.content
+                    
+                    # Split into lines and return requested range
+                    all_lines = all_content.splitlines()
+                    total_lines = len(all_lines)
+                    
+                    # Adjust line range if needed
+                    if start_line > total_lines:
+                        start_line = 1
+                    if end_line > total_lines:
+                        end_line = total_lines
+                    
+                    # Get requested lines (adjust for 0-based index)
+                    selected_lines = all_lines[start_line-1:end_line]
+                    content = '\n'.join(selected_lines)
+                    
+                    return {
+                        "id": file.id,
+                        "file_path": file.file_path,
+                        "language": file.language or "unknown",
+                        "repo_name": file.repo_name,
+                        "file_size": file.file_size,
+                        "match_method": match_method,
+                        "content": content,
+                        "lines": {
+                            "start": start_line,
+                            "end": end_line,
+                            "count": len(selected_lines),
+                            "total": total_lines
+                        }
+                    }
+                
+                # Find chunks that contain the requested lines
                 chunks_query = text("""
                     SELECT content FROM file_chunks 
                     WHERE file_id = :file_id
+                    AND end_line >= :start_line
+                    AND start_line <= :end_line
                     ORDER BY chunk_index
-                    OFFSET :chunk_offset
-                    LIMIT :chunk_limit
                 """)
-                
-                # Determine how many chunks to fetch
-                chunks_to_fetch = file.chunks_count
-                if sibling_chunk_num is not None and sibling_chunk_num < chunks_to_fetch:
-                    chunks_to_fetch = sibling_chunk_num
                 
                 # Log the query
                 formatted_query = str(chunks_query) \
                     .replace(":file_id", str(file.id)) \
-                    .replace(":chunk_offset", str(offset)) \
-                    .replace(":chunk_limit", str(chunks_to_fetch))
-                print(f"[API-SQL] Chunks query: {formatted_query}")
+                    .replace(":start_line", str(start_line)) \
+                    .replace(":end_line", str(end_line))
+                print(f"[API-SQL] Line-based chunks query: {formatted_query}")
                 
-                # Get file content
-                full_content = ""
+                chunks = session.execute(chunks_query, {
+                    "file_id": file.id,
+                    "start_line": start_line,
+                    "end_line": end_line
+                })
                 
-                # Check if file has chunks
-                if file.chunks_count == 0:
-                    print(f"[API-WARNING] File {file.id} ({file.file_path}) has no chunks")
-                    full_content = "[File has no content chunks]"
-                else:
-                    chunks = session.execute(chunks_query, {
-                        "file_id": file.id,
-                        "chunk_offset": offset,
-                        "chunk_limit": chunks_to_fetch
-                    })
-                    
-                    chunks_loaded = 0
-                    start_chunk = offset
-                    end_chunk = offset
-                    
-                    for chunk in chunks:
-                        full_content += chunk.content
-                        chunks_loaded += 1
-                        end_chunk = offset + chunks_loaded - 1
-                    
-                    print(f"[API] Loaded {chunks_loaded} chunks for file {file.file_path} (chunks {start_chunk}-{end_chunk})")
-                    
-                    # Add pagination info
-                    has_more = (offset + chunks_loaded) < file.chunks_count
-                    next_offset = offset + chunks_loaded if has_more else None
-                    
-                    # Add truncation notice
-                    if sibling_chunk_num is not None and sibling_chunk_num < (file.chunks_count - offset):
-                        full_content += f"\n\n[Content truncated: showing chunks {start_chunk}-{end_chunk} of {file.chunks_count} total chunks]"
+                # Process chunks to extract the requested lines
+                all_lines = []
                 
-                # Return file information and content
-                response = {
-                    "id": file.id,
-                    "file_path": file.file_path,
-                    "language": file.language or "unknown",
-                    "repo_name": file.repo_name,
-                    "file_size": file.file_size,
-                    "chunks_count": file.chunks_count,
-                    "match_method": match_method,
-                    "content": full_content,
-                    "pagination": {
-                        "offset": offset,
-                        "limit": chunks_loaded,
-                        "total_chunks": file.chunks_count,
-                        "has_more": offset + chunks_loaded < file.chunks_count,
-                        "next_offset": next_offset
+                for chunk_row in chunks:
+                    # Split chunk into lines and add to the list
+                    chunk_lines = chunk_row.content.splitlines()
+                    all_lines.extend(chunk_lines)
+                
+                # Get chunks info for determining line offsets
+                line_info_query = text("""
+                    SELECT chunk_index, start_line, end_line FROM file_chunks 
+                    WHERE file_id = :file_id
+                    AND end_line >= :start_line
+                    AND start_line <= :end_line
+                    ORDER BY chunk_index
+                """)
+                
+                line_info = session.execute(line_info_query, {
+                    "file_id": file.id,
+                    "start_line": start_line,
+                    "end_line": end_line
+                }).fetchall()
+                
+                if line_info and all_lines:
+                    # Determine the offset of the first line in our result
+                    first_chunk_start_line = line_info[0].start_line
+                    
+                    # Calculate which range of lines to include
+                    line_offset = start_line - first_chunk_start_line
+                    if line_offset < 0:
+                        line_offset = 0
+                        
+                    line_end = line_offset + (end_line - start_line + 1)
+                    if line_end > len(all_lines):
+                        line_end = len(all_lines)
+                        
+                    # Get only the requested lines
+                    selected_lines = all_lines[line_offset:line_end]
+                    full_content = '\n'.join(selected_lines)
+                    
+                    # Add line range info
+                    actual_start = start_line
+                    actual_end = min(end_line, file.line_count)
+                    
+                    # Return file information and content
+                    return {
+                        "id": file.id,
+                        "file_path": file.file_path,
+                        "language": file.language or "unknown",
+                        "repo_name": file.repo_name,
+                        "file_size": file.file_size,
+                        "total_lines": file.line_count,
+                        "match_method": match_method,
+                        "content": full_content,
+                        "lines": {
+                            "start": actual_start,
+                            "end": actual_end,
+                            "count": actual_end - actual_start + 1,
+                            "total": file.line_count
+                        }
                     }
-                }
-                
-                return response
+                else:
+                    # Handle the case where no lines were found or line info is missing
+                    print(f"[API-WARNING] No content found for lines {start_line}-{end_line} in file {file.id}")
+                    return {
+                        "id": file.id,
+                        "file_path": file.file_path,
+                        "language": file.language or "unknown",
+                        "repo_name": file.repo_name,
+                        "file_size": file.file_size,
+                        "total_lines": file.line_count,
+                        "match_method": match_method,
+                        "content": f"[No content found for lines {start_line}-{end_line}]",
+                        "lines": {
+                            "start": start_line,
+                            "end": end_line,
+                            "requested_count": end_line - start_line + 1,
+                            "total": file.line_count
+                        }
+                    }
             except HTTPException:
                 raise
             except Exception as db_error:
@@ -1057,160 +1169,6 @@ async def get_file_by_path(
         raise
     except Exception as e:
         error_message = f"Error retrieving file {file_path}: {e}"
-        logger.error(error_message)
-        logger.error(traceback.format_exc())
-        print(f"[API-ERROR] {error_message}")
-        raise HTTPException(
-            status_code=500, detail=error_message
-        )
-
-
-@app.get("/file_indexer/file/{file_id}", tags=["File Indexer"])
-async def get_file_by_id(
-    file_id: int = Path(..., description="ID of the file to retrieve", gt=0),
-    sibling_chunk_num: Optional[int] = Query(default=1, description="Number of sibling chunks to include around each match (default: 1)"),
-    offset: int = Query(default=0, description="Chunk offset for pagination (0-based)", ge=0),
-):
-    """
-    Get the content of a file by its ID.
-    
-    This endpoint retrieves the content of a file by its unique ID. This is useful when you've already
-    found a file through search and want to retrieve its content.
-    
-    Args:
-        file_id: The ID of the file to retrieve
-        sibling_chunk_num: Number of sibling chunks to include around each match (default: 1)
-        offset: Chunk offset for pagination (0-based)
-        
-    Returns:
-        File content and metadata.
-    """
-    if not file_indexer:
-        raise HTTPException(
-            status_code=503, detail="File indexer not initialized"
-        )
-
-    try:
-        with SessionLocal() as session:
-            try:
-                # First check if the file table has data
-                file_count = session.execute(text("SELECT COUNT(*) FROM code_files")).scalar()
-                chunk_count = session.execute(text("SELECT COUNT(*) FROM file_chunks")).scalar()
-                print(f"[API] Database has {file_count} files and {chunk_count} chunks")
-                
-                if file_count == 0:
-                    print("[API-ERROR] The code_files table is empty!")
-                    raise HTTPException(
-                        status_code=500, detail="No files are indexed in the database"
-                    )
-                
-                # Query for the file
-                file = session.query(CodeFile).filter_by(id=file_id).first()
-                if not file:
-                    print(f"[API-ERROR] File with ID {file_id} not found")
-                    raise HTTPException(
-                        status_code=404, detail=f"File with ID {file_id} not found"
-                    )
-                
-                print(f"[API] Found file ID {file_id} at path {file.file_path}")
-                
-                # Validate offset
-                if offset >= file.chunks_count:
-                    if file.chunks_count > 0:
-                        raise HTTPException(
-                            status_code=400, 
-                            detail=f"Invalid offset: {offset}. File has {file.chunks_count} chunks (0-{file.chunks_count-1})"
-                        )
-                    else:
-                        # If the file has no chunks, we'll handle it below
-                        offset = 0
-                
-                # Get file content with pagination
-                chunks_query = text("""
-                    SELECT content FROM file_chunks 
-                    WHERE file_id = :file_id
-                    ORDER BY chunk_index
-                    OFFSET :chunk_offset
-                    LIMIT :chunk_limit
-                """)
-                
-                # Determine how many chunks to fetch
-                chunks_to_fetch = file.chunks_count
-                if sibling_chunk_num is not None and sibling_chunk_num < chunks_to_fetch:
-                    chunks_to_fetch = sibling_chunk_num
-                
-                # Log the query
-                formatted_query = str(chunks_query) \
-                    .replace(":file_id", str(file.id)) \
-                    .replace(":chunk_offset", str(offset)) \
-                    .replace(":chunk_limit", str(chunks_to_fetch))
-                print(f"[API-SQL] Chunks query: {formatted_query}")
-                
-                # Get file content
-                full_content = ""
-                
-                # Check if file has chunks
-                if file.chunks_count == 0:
-                    print(f"[API-WARNING] File {file.id} ({file.file_path}) has no chunks")
-                    full_content = "[File has no content chunks]"
-                else:
-                    chunks = session.execute(chunks_query, {
-                        "file_id": file.id,
-                        "chunk_offset": offset,
-                        "chunk_limit": chunks_to_fetch
-                    })
-                    
-                    chunks_loaded = 0
-                    start_chunk = offset
-                    end_chunk = offset
-                    
-                    for chunk in chunks:
-                        full_content += chunk.content
-                        chunks_loaded += 1
-                        end_chunk = offset + chunks_loaded - 1
-                    
-                    print(f"[API] Loaded {chunks_loaded} chunks for file {file.file_path} (chunks {start_chunk}-{end_chunk})")
-                    
-                    # Add pagination info
-                    has_more = (offset + chunks_loaded) < file.chunks_count
-                    next_offset = offset + chunks_loaded if has_more else None
-                    
-                    # Add truncation notice
-                    if sibling_chunk_num is not None and sibling_chunk_num < (file.chunks_count - offset):
-                        full_content += f"\n\n[Content truncated: showing chunks {start_chunk}-{end_chunk} of {file.chunks_count} total chunks]"
-                
-                # Return file information and content
-                response = {
-                    "id": file.id,
-                    "file_path": file.file_path,
-                    "language": file.language or "unknown",
-                    "repo_name": file.repo_name,
-                    "file_size": file.file_size,
-                    "chunks_count": file.chunks_count,
-                    "content": full_content,
-                    "pagination": {
-                        "offset": offset,
-                        "limit": chunks_loaded,
-                        "total_chunks": file.chunks_count,
-                        "has_more": offset + chunks_loaded < file.chunks_count,
-                        "next_offset": next_offset
-                    }
-                }
-                
-                return response
-            except HTTPException:
-                # Re-raise HTTP exceptions
-                raise
-            except Exception as db_error:
-                error_message = f"Database error while retrieving file ID {file_id}: {db_error}"
-                logger.error(error_message)
-                print(f"[API-ERROR] {error_message}")
-                raise HTTPException(status_code=500, detail=error_message)
-    except HTTPException:
-        # Re-raise HTTP exceptions
-        raise
-    except Exception as e:
-        error_message = f"Error retrieving file with ID {file_id}: {e}"
         logger.error(error_message)
         logger.error(traceback.format_exc())
         print(f"[API-ERROR] {error_message}")
@@ -1263,7 +1221,6 @@ curl -X POST "http://localhost:8000/file_indexer/vector_search" \
     "query": "implement transaction",
     "limit": 10,
     "show_content": true,
-    "sibling_chunk_num": 2,
     "repository": "tidb"
   }'
 
@@ -1285,15 +1242,11 @@ curl -X GET "http://localhost:8000/file_indexer/search?query=implement%20transac
 curl -X GET "http://localhost:8000/file_indexer/file?file_path=%2Fpath%2Fto%2Ffile.py" \
   -H "Accept: application/json"
 
-# Get file content with limited chunks
-curl -X GET "http://localhost:8000/file_indexer/file?file_path=%2Fpath%2Fto%2Ffile.py&sibling_chunk_num=2" \
+# Get file content with specified line range
+curl -X GET "http://localhost:8000/file_indexer/file?file_path=%2Fpath%2Fto%2Ffile.py&start_line=10&end_line=20" \
   -H "Accept: application/json"
 
-# Get file content by ID
-curl -X GET "http://localhost:8000/file_indexer/file/123" \
-  -H "Accept: application/json"
-
-# Get file content by ID with limited chunks
-curl -X GET "http://localhost:8000/file_indexer/file/123?sibling_chunk_num=2" \
+# Get file content with compact line range syntax
+curl -X GET "http://localhost:8000/file_indexer/file?file_path=%2Fpath%2Fto%2Ffile.py&lines=10-20" \
   -H "Accept: application/json"
 """
