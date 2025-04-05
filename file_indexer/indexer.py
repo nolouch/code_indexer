@@ -387,119 +387,309 @@ class CodeIndexer:
                     print("[INFO] No data available in database tables")
                     return []
             
-            # Prepare query - escape special characters for LIKE pattern
-            query_pattern = f"%{query_text.replace('%', '\\%').replace('_', '\\_')}%"
-            
-            # Base query to search in file chunks
-            base_sql = """
-                SELECT DISTINCT
-                    f.id, 
-                    f.file_path, 
-                    f.language,
-                    f.repo_name,
-                    f.chunks_count,
-                    1.0 as score
-                FROM code_files f
-                JOIN file_chunks c ON f.id = c.file_id
-                WHERE c.content LIKE :query_pattern
-            """
-            
-            # Add repository filter if provided
-            if repository:
-                base_sql += " AND f.repo_name = :repo_name"
-            
-            # Complete the query with limit
-            sql_query = text(base_sql + " LIMIT :limit")
-            
-            # Prepare parameters
-            params = {"query_pattern": query_pattern, "limit": limit}
-            if repository:
-                params["repo_name"] = repository
-            
-            # Log the SQL query
-            formatted_sql = str(sql_query)
-            for param_name, param_value in params.items():
-                formatted_sql = formatted_sql.replace(f":{param_name}", f"'{param_value}'")
-            
-            #print(f"[SQL] Main search query: {formatted_sql}")
-            
-            # Execute query
-            results = []
-            with self.engine.connect() as conn:
+            # Check if we can use TiDB's FULLTEXT search capabilities
+            use_tidb_fts = False
+            if self.using_tidb:
+                # Check if the FULLTEXT index exists
                 try:
-                    result_rows = list(conn.execute(sql_query, params))
-                    print(f"[INFO] Found {len(result_rows)} matching files")
-                    
-                    for row in result_rows:
-                        file = CodeFile(
-                            id=row.id,
-                            file_path=row.file_path,
-                            language=row.language,
-                            repo_name=row.repo_name
-                        )
+                    with self.engine.connect() as conn:
+                        # Check for the existence of FULLTEXT index
+                        index_exists = conn.execute(text("""
+                            SELECT COUNT(*) 
+                            FROM INFORMATION_SCHEMA.STATISTICS 
+                            WHERE TABLE_NAME = 'file_chunks' 
+                            AND INDEX_NAME = 'idx_content_fulltext'
+                            AND INDEX_TYPE = 'FULLTEXT'
+                        """)).scalar()
                         
-                        file_content = ""
-                        
-                        if show_content:
-                            # Prioritize chunks that match the query
-                            chunks_query = text("""
-                                SELECT content, chunk_index FROM file_chunks 
-                                WHERE file_id = :file_id
-                                ORDER BY 
-                                    CASE WHEN content LIKE :query_pattern THEN 0 ELSE 1 END,
-                                    chunk_index
-                                LIMIT :chunk_limit
-                            """)
-                            
-                            # Determine how many chunks to fetch
-                            chunks_to_fetch = row.chunks_count
-                            if sibling_chunk_num is not None and sibling_chunk_num < chunks_to_fetch:
-                                chunks_to_fetch = sibling_chunk_num
-                            
-                            # Execute chunks query without too much logging
-                            chunks_params = {
-                                "file_id": row.id,
-                                "query_pattern": query_pattern,
-                                "chunk_limit": chunks_to_fetch
-                            }
-                            
-                            # Log just once per query type
-                            if row == result_rows[0]:  # Only for the first file
-                                # Format the chunks query for logging
-                                formatted_chunks_sql = str(chunks_query)
-                                for param_name, param_value in chunks_params.items():
-                                    if param_name == "file_id":
-                                        formatted_chunks_sql = formatted_chunks_sql.replace(f":{param_name}", f"<file_id>")
-                                    else:
-                                        formatted_chunks_sql = formatted_chunks_sql.replace(f":{param_name}", f"'{param_value}'")
-                                
-                                print(f"[SQL] Chunks retrieval query: {formatted_chunks_sql}")
-                            
-                            # Get chunks content for this file
-                            try:
-                                chunk_results = list(conn.execute(chunks_query, chunks_params))
-                                
-                                for chunk_row in chunk_results:
-                                    file_content += chunk_row.content
-                                
-                                # Add indication if content is truncated
-                                if sibling_chunk_num is not None and sibling_chunk_num < row.chunks_count:
-                                    file_content += f"\n\n[Content truncated: showing {sibling_chunk_num} of {row.chunks_count} chunks]"
-                            except Exception as chunk_error:
-                                print(f"[ERROR] Failed to retrieve chunks for file ID {row.id}: {chunk_error}")
-                        
-                        # For full text search, we don't have a meaningful similarity score
-                        # Just use 1.0 to indicate a match
-                        results.append((file, 1.0, file_content))
-                except Exception as query_error:
-                    print(f"[ERROR] Failed to execute search query: {query_error}")
-                    traceback.print_exc()
+                        # Only use FULLTEXT search if the index exists
+                        if index_exists > 0:
+                            use_tidb_fts = True
+                            print(f"[INFO] FULLTEXT index found on file_chunks.content")
+                        else:
+                            print(f"[WARNING] FULLTEXT index not found. Using LIKE-based search instead.")
+                except Exception as e:
+                    print(f"[WARNING] Error checking for FULLTEXT index: {e}")
+                    # Fall back to LIKE-based search
+                    use_tidb_fts = False
             
-            print(f"[INFO] Full text search completed with {len(results)} results")
-            return results
+            if use_tidb_fts:
+                # Use optimized two-step search approach with TiDB FULLTEXT capabilities
+                return self._tidb_fulltext_search(
+                    query_text,
+                    limit=limit,
+                    show_content=show_content,
+                    sibling_chunk_num=sibling_chunk_num,
+                    repository=repository
+                )
+            else:
+                # Fallback to LIKE-based search
+                print(f"[INFO] Using LIKE-based search with query: {query_text}")
+                
+                # Prepare query - escape special characters for LIKE pattern
+                query_pattern = f"%{query_text.replace('%', '\\%').replace('_', '\\_')}%"
+                
+                # Base query to search in file chunks
+                base_sql = """
+                    SELECT DISTINCT
+                        f.id, 
+                        f.file_path, 
+                        f.language,
+                        f.repo_name,
+                        f.chunks_count,
+                        1.0 as score
+                    FROM code_files f
+                    JOIN file_chunks c ON f.id = c.file_id
+                    WHERE c.content LIKE :query_pattern
+                """
+                
+                # Add repository filter if provided
+                if repository:
+                    base_sql += " AND f.repo_name = :repo_name"
+                
+                # Complete the query with limit
+                sql_query = text(base_sql + " LIMIT :limit")
+                
+                # Prepare parameters
+                params = {"query_pattern": query_pattern, "limit": limit}
+                if repository:
+                    params["repo_name"] = repository
+                
+                # Log the SQL query
+                formatted_sql = str(sql_query)
+                for param_name, param_value in params.items():
+                    formatted_sql = formatted_sql.replace(f":{param_name}", f"'{param_value}'")
+                
+                print(f"[SQL] Main search query: {formatted_sql}")
+                
+                # Execute query
+                results = []
+                with self.engine.connect() as conn:
+                    try:
+                        result_rows = list(conn.execute(sql_query, params))
+                        print(f"[INFO] Found {len(result_rows)} matching files")
+                        
+                        for row in result_rows:
+                            file = CodeFile(
+                                id=row.id,
+                                file_path=row.file_path,
+                                language=row.language,
+                                repo_name=row.repo_name
+                            )
+                            
+                            file_content = ""
+                            
+                            if show_content:
+                                # Prioritize chunks that match the query
+                                chunks_query = text("""
+                                    SELECT content, chunk_index FROM file_chunks 
+                                    WHERE file_id = :file_id
+                                    ORDER BY 
+                                        CASE WHEN content LIKE :query_pattern THEN 0 ELSE 1 END,
+                                        chunk_index
+                                    LIMIT :chunk_limit
+                                """)
+                                
+                                # Determine how many chunks to fetch
+                                chunks_to_fetch = row.chunks_count
+                                if sibling_chunk_num is not None and sibling_chunk_num < chunks_to_fetch:
+                                    chunks_to_fetch = sibling_chunk_num
+                                
+                                # Execute chunks query without too much logging
+                                chunks_params = {
+                                    "file_id": row.id,
+                                    "query_pattern": query_pattern,
+                                    "chunk_limit": chunks_to_fetch
+                                }
+                                
+                                # Log just once per query type
+                                if row == result_rows[0]:  # Only for the first file
+                                    # Format the chunks query for logging
+                                    formatted_chunks_sql = str(chunks_query)
+                                    for param_name, param_value in chunks_params.items():
+                                        if param_name == "file_id":
+                                            formatted_chunks_sql = formatted_chunks_sql.replace(f":{param_name}", f"<file_id>")
+                                        else:
+                                            formatted_chunks_sql = formatted_chunks_sql.replace(f":{param_name}", f"'{param_value}'")
+                                    
+                                    print(f"[SQL] Chunks retrieval query: {formatted_chunks_sql}")
+                                
+                                # Get chunks content for this file
+                                try:
+                                    chunk_results = list(conn.execute(chunks_query, chunks_params))
+                                    
+                                    for chunk_row in chunk_results:
+                                        file_content += chunk_row.content
+                                    
+                                    # Add indication if content is truncated
+                                    if sibling_chunk_num is not None and sibling_chunk_num < row.chunks_count:
+                                        file_content += f"\n\n[Content truncated: showing {sibling_chunk_num} of {row.chunks_count} chunks]"
+                                except Exception as chunk_error:
+                                    print(f"[ERROR] Failed to retrieve chunks for file ID {row.id}: {chunk_error}")
+                            
+                            # For full text search, we don't have a meaningful similarity score
+                            # Just use 1.0 to indicate a match
+                            results.append((file, 1.0, file_content))
+                    except Exception as query_error:
+                        print(f"[ERROR] Failed to execute search query: {query_error}")
+                        traceback.print_exc()
+                
+                print(f"[INFO] Full text search completed with {len(results)} results")
+                return results
                 
         except Exception as e:
             logger.error(f"Error in full text search: {e}")
             logger.error(traceback.format_exc())
             print(f"[ERROR] Exception in full text search: {e}")
+            return []
+
+    def _tidb_fulltext_search(self, query_text, limit=10, show_content=True, sibling_chunk_num=1, repository=None):
+        """Perform two-step full-text search using TiDB's fts_match_word function
+        
+        This implementation uses a more efficient two-step approach:
+        1. Find the most relevant chunks first
+        2. Get file information based on those chunks
+        
+        Args:
+            query_text: Text to search for
+            limit: Maximum number of results to return
+            show_content: Whether to include file content in results
+            sibling_chunk_num: Number of sibling chunks to include around each match (default: 1)
+            repository: Optional repository name to filter results
+        """
+        print(f"[INFO] Using optimized TiDB FULLTEXT search with query: {query_text}")
+        
+        try:
+            # Step 1: Find the most relevant chunks first
+            # Get 3-5 times more chunks than the limit to ensure enough chunks per file
+            chunks_limit = max(limit * 5, 100)  # Get at least 100 chunks or 5x the limit
+            
+            chunk_query = text("""
+                SELECT c.id AS chunk_id, c.file_id, c.chunk_index
+                FROM file_chunks c
+                WHERE fts_match_word(:query_text, c.content)
+                ORDER BY c.id
+                LIMIT :chunks_limit
+            """)
+            
+            chunk_params = {"query_text": query_text, "chunks_limit": chunks_limit}
+            
+            # Log the query
+            formatted_chunk_query = str(chunk_query)
+            formatted_chunk_query = formatted_chunk_query.replace(":query_text", f"'{query_text}'")
+            formatted_chunk_query = formatted_chunk_query.replace(":chunks_limit", f"{chunks_limit}")
+            print(f"[SQL] Step 1 - Find relevant chunks: {formatted_chunk_query}")
+            
+            with self.engine.connect() as conn:
+                try:
+                    # Execute the chunk query to find relevant chunks
+                    chunk_results = conn.execute(chunk_query, chunk_params).fetchall()
+                    
+                    if not chunk_results:
+                        print("[INFO] No matching chunks found")
+                        return []
+                    
+                    # Extract unique file IDs from the matching chunks
+                    file_ids = set(chunk.file_id for chunk in chunk_results)
+                    print(f"[INFO] Found {len(chunk_results)} matching chunks across {len(file_ids)} files")
+                    
+                    # Step 2: Get file information for the matching files
+                    file_query = text("""
+                        SELECT id, file_path, language, repo_name, chunks_count
+                        FROM code_files
+                        WHERE id IN :file_ids
+                    """)
+                    
+                    if repository:
+                        file_query = text("""
+                            SELECT id, file_path, language, repo_name, chunks_count
+                            FROM code_files
+                            WHERE id IN :file_ids AND repo_name = :repo_name
+                        """)
+                        
+                    # Execute the file query with parameters
+                    file_params = {"file_ids": tuple(file_ids)}
+                    if repository:
+                        file_params["repo_name"] = repository
+                    
+                    # Log the query
+                    formatted_file_query = str(file_query).replace(":file_ids", f"({', '.join(str(id) for id in file_ids)})")
+                    if repository:
+                        formatted_file_query = formatted_file_query.replace(":repo_name", f"'{repository}'")
+                    print(f"[SQL] Step 2 - Get file information: {formatted_file_query}")
+                    
+                    # Get file information
+                    file_results = conn.execute(file_query, file_params).fetchall()
+                    
+                    # Step 3: Set all scores to 1.0
+                    file_scores = {file_id: 1.0 for file_id in file_ids}
+                    
+                    # Use ordered file IDs since all scores are equal
+                    sorted_file_ids = sorted(file_scores.keys())
+                    
+                    # Limit to requested number of results
+                    result_file_ids = sorted_file_ids[:limit]
+                    print(f"[INFO] Returning top {len(result_file_ids)} files")
+                    
+                    # Create a mapping from file ID to file information
+                    files_info = {file_row.id: file_row for file_row in file_results}
+                    
+                    # Step 4: Prepare the final results
+                    results = []
+                    
+                    # Process each file in the result set
+                    for file_id in result_file_ids:
+                        if file_id not in files_info:
+                            continue  # Skip if file was filtered out (e.g., by repository)
+                            
+                        file_info = files_info[file_id]
+                        file = CodeFile(
+                            id=file_info.id,
+                            file_path=file_info.file_path,
+                            language=file_info.language,
+                            repo_name=file_info.repo_name
+                        )
+                        
+                        file_content = ""
+                        
+                        if show_content:
+                            # Get the matching chunks for this file - ordered by chunk_index
+                            content_query = text("""
+                                SELECT c.id, c.content, c.chunk_index
+                                FROM file_chunks c
+                                WHERE c.file_id = :file_id AND fts_match_word(:query_text, c.content)
+                                ORDER BY c.chunk_index
+                                LIMIT :chunk_limit
+                            """)
+                            
+                            content_params = {
+                                "file_id": file_id,
+                                "query_text": query_text,
+                                "chunk_limit": sibling_chunk_num or file_info.chunks_count
+                            }
+                            
+                            # Get content for matching chunks
+                            content_results = conn.execute(content_query, content_params).fetchall()
+                            
+                            for content_row in content_results:
+                                file_content += content_row.content
+                            
+                            # Add indication if content is truncated
+                            if sibling_chunk_num is not None and sibling_chunk_num < file_info.chunks_count:
+                                file_content += f"\n\n[Content truncated: showing {len(content_results)} chunks with search term out of {file_info.chunks_count} total chunks]"
+                        
+                        # Use fixed score of 1.0
+                        results.append((file, 1.0, file_content))
+                
+                except Exception as e:
+                    print(f"[ERROR] Failed to execute full-text search: {e}")
+                    traceback.print_exc()
+                    return []
+                    
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error in TiDB full-text search: {e}")
+            logger.error(traceback.format_exc())
+            print(f"[ERROR] Exception in TiDB full-text search: {e}")
             return []
