@@ -567,7 +567,7 @@ class CodeIndexer:
                 SELECT c.id AS chunk_id, c.file_id, c.chunk_index
                 FROM file_chunks c
                 WHERE fts_match_word(:query_text, c.content)
-                ORDER BY c.id
+                ORDER BY fts_match_word(:query_text, c.content) DESC, c.id
                 LIMIT :chunks_limit
             """)
             
@@ -652,12 +652,12 @@ class CodeIndexer:
                         file_content = ""
                         
                         if show_content:
-                            # Get the matching chunks for this file - ordered by chunk_index
+                            # Get the matching chunks for this file - ordered by relevance then chunk_index
                             content_query = text("""
                                 SELECT c.id, c.content, c.chunk_index
                                 FROM file_chunks c
                                 WHERE c.file_id = :file_id AND fts_match_word(:query_text, c.content)
-                                ORDER BY c.chunk_index
+                                ORDER BY fts_match_word(:query_text, c.content) DESC, c.chunk_index
                                 LIMIT :chunk_limit
                             """)
                             
