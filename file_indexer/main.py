@@ -3,10 +3,15 @@ import os
 from pathlib import Path
 import sys
 
-# 添加项目根目录到路径，以便导入setting模块
+# Add project root directory to path to import setting modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from setting.embedding import EMBEDDING_MODEL
 from setting.base import DATABASE_URI
+from setting.fileindexer_llm import (
+    FILEINDER_LLM_PROVIDER, 
+    FILEINDER_LLM_MODEL, 
+    FILEINDER_GENERATE_COMMENTS
+)
 
 # Use absolute import
 from file_indexer.indexer import CodeIndexer
@@ -17,9 +22,11 @@ def main():
     
     subparsers = parser.add_subparsers(dest='command', help='Command to run')
     
-    # 获取默认数据库连接字符串
+    # Get default database connection string
     default_db_uri = DATABASE_URI or 'mysql+pymysql://root@localhost:4000/code_index'
     default_model = EMBEDDING_MODEL["name"]
+    default_llm_provider = FILEINDER_LLM_PROVIDER
+    default_llm_model = FILEINDER_LLM_MODEL
     
     # Index command
     index_parser = subparsers.add_parser('index', help='Index code files')
@@ -28,6 +35,8 @@ def main():
                             help=f'Database connection string (default: {default_db_uri})')
     index_parser.add_argument('--no-embeddings', action='store_true', 
                             help='Skip generating embeddings')
+    index_parser.add_argument('--no-comments', action='store_true',
+                           help='Skip generating LLM comments for code')
     index_parser.add_argument('--model', default=default_model,
                             help=f'Embedding model to use (default: {default_model})')
     index_parser.add_argument('--chunk-size', type=int, default=CHUNK_SIZE,
@@ -36,6 +45,10 @@ def main():
                             help='Ignore test files and directories')
     index_parser.add_argument('--repo-name', type=str, default=None,
                             help='Repository name to use (default: directory name)')
+    index_parser.add_argument('--llm-provider', type=str, default=default_llm_provider,
+                           help=f'LLM provider for code comments (default: {default_llm_provider})')
+    index_parser.add_argument('--llm-model', type=str, default=default_llm_model,
+                           help=f'LLM model for code comments (default: {default_llm_model})')
     
     # Search command
     search_parser = subparsers.add_parser('search', help='Search for similar code')
@@ -72,12 +85,15 @@ def main():
         indexer = CodeIndexer(
             db_path=args.db,
             embedding_model=args.model,
-            ignore_tests=args.ignore_tests
+            ignore_tests=args.ignore_tests,
+            llm_provider=args.llm_provider,
+            llm_model=args.llm_model
         )
         
         indexer.index_directory(
             directory, 
             generate_embeddings=not args.no_embeddings,
+            generate_comments=not args.no_comments,
             repo_name=args.repo_name
         )
         

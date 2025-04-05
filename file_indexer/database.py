@@ -109,6 +109,10 @@ class CodeFile(Base):
     language = Column(String(50), nullable=True)
     # Use TiDB vector data type for embedding
     file_embedding = Column(VECTOR(EMBEDDING_DIM))
+    # LLM-generated comments
+    llm_comments = Column(LONGTEXT, nullable=True)
+    # Embeddings for LLM comments
+    comments_embedding = Column(VECTOR(EMBEDDING_DIM))
 
     # Relationship with file content chunks
     chunks = relationship("FileChunk", back_populates="file", cascade="all, delete-orphan")
@@ -176,6 +180,13 @@ def setup_vector_indexes(engine):
                 """))
                 logger.info("Created file vector cosine index")
                 
+                # Create vector index for comments embeddings
+                conn.execute(text("""
+                    CREATE VECTOR INDEX IF NOT EXISTS idx_comments_vector_cosine 
+                    ON code_files ((VEC_COSINE_DISTANCE(comments_embedding))) USING HNSW
+                """))
+                logger.info("Created comments vector cosine index")
+                
                 # Commit the transaction
                 conn.commit()
             except Exception as e:
@@ -236,6 +247,39 @@ def init_db(engine=None):
                     """))
                     conn.commit()
                     logger.info("Added repo_name column to code_files table")
+                
+                # Check if llm_comments column exists
+                result = conn.execute(text("""
+                    SELECT COUNT(*) 
+                    FROM INFORMATION_SCHEMA.COLUMNS 
+                    WHERE TABLE_NAME = 'code_files' AND COLUMN_NAME = 'llm_comments'
+                """)).scalar()
+                
+                if result == 0:
+                    # Column doesn't exist, add it
+                    conn.execute(text("""
+                        ALTER TABLE code_files 
+                        ADD COLUMN llm_comments LONGTEXT NULL
+                    """))
+                    conn.commit()
+                    logger.info("Added llm_comments column to code_files table")
+                
+                # Check if comments_embedding column exists
+                result = conn.execute(text("""
+                    SELECT COUNT(*) 
+                    FROM INFORMATION_SCHEMA.COLUMNS 
+                    WHERE TABLE_NAME = 'code_files' AND COLUMN_NAME = 'comments_embedding'
+                """)).scalar()
+                
+                if result == 0:
+                    # Column doesn't exist, add it
+                    conn.execute(text("""
+                        ALTER TABLE code_files 
+                        ADD COLUMN comments_embedding VECTOR({})
+                    """.format(EMBEDDING_DIM)))
+                    conn.commit()
+                    logger.info("Added comments_embedding column to code_files table")
+                
             elif 'sqlite' in str(engine.url):
                 # For SQLite
                 result = conn.execute(text("""
@@ -252,6 +296,39 @@ def init_db(engine=None):
                     """))
                     conn.commit()
                     logger.info("Added repo_name column to code_files table")
+                
+                # Check if llm_comments column exists
+                result = conn.execute(text("""
+                    SELECT COUNT(*) 
+                    FROM pragma_table_info('code_files') 
+                    WHERE name = 'llm_comments'
+                """)).scalar()
+                
+                if result == 0:
+                    # Column doesn't exist, add it
+                    conn.execute(text("""
+                        ALTER TABLE code_files 
+                        ADD COLUMN llm_comments TEXT NULL
+                    """))
+                    conn.commit()
+                    logger.info("Added llm_comments column to code_files table")
+                
+                # For SQLite, we need to handle the vector field differently
+                # since SQLite doesn't have a native VECTOR type
+                result = conn.execute(text("""
+                    SELECT COUNT(*) 
+                    FROM pragma_table_info('code_files') 
+                    WHERE name = 'comments_embedding'
+                """)).scalar()
+                
+                if result == 0:
+                    # Column doesn't exist, add it
+                    conn.execute(text("""
+                        ALTER TABLE code_files 
+                        ADD COLUMN comments_embedding TEXT NULL
+                    """))
+                    conn.commit()
+                    logger.info("Added comments_embedding column to code_files table")
     except Exception as e:
         logger.warning(f"Error updating schema: {e}")
     

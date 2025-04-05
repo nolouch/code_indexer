@@ -2,7 +2,11 @@ import time
 import logging
 from abc import ABC, abstractmethod
 from typing import Optional, Generator
-from setting.base import MODEL_CONFIGS
+import sys
+import os
+
+# Import from the configuration file for basic settings
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 logger = logging.getLogger(__name__)
 
@@ -53,18 +57,18 @@ class BaseLLMProvider(ABC):
 
     def _get_default_model_config(self) -> dict:
         """Get model-specific configuration parameters."""
-        # First check if there's a user-defined config in environment variables
-        env_config = MODEL_CONFIGS.get(self.model, {})
-        if env_config:
-            return env_config
-
-        # If no environment config, use default configs
+        # Use model-specific defaults based on model name
         if self.model == "gpt-4o":
             return {
                 "temperature": 0,
             }
         elif self.model == "o3-mini":
             return {"reasoning_effort": "high"}
+        elif "deepseek" in self.model:
+            return {
+                "temperature": 0.1,
+                "max_tokens": 256,
+            }
 
         return {}
 

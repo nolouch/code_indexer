@@ -10,6 +10,13 @@ import traceback
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from setting.embedding import EMBEDDING_MODEL, VECTOR_SEARCH
 from setting.base import DATABASE_URI
+from setting.fileindexer_llm import (
+    FILEINDER_LLM_PROVIDER, 
+    FILEINDER_LLM_MODEL, 
+    FILEINDER_COMMENTS_SYSTEM_PROMPT,
+    FILEINDER_COMMENTS_MAX_LENGTH,
+    FILEINDER_GENERATE_COMMENTS
+)
 
 # Use absolute imports
 from file_indexer.database import (
@@ -18,6 +25,7 @@ from file_indexer.database import (
 )
 from file_indexer.embeddings import CodeEmbedder
 from file_indexer.scanner import CodeScanner
+from llm.factory import LLMInterface
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +33,8 @@ logger = logging.getLogger(__name__)
 MAX_FILE_SIZE = 100 * 1024 * 1024  # Increased maximum file size due to chunk storage
 
 class CodeIndexer:
-    def __init__(self, db_path=None, embedding_model=None, embedding_dim=None, ignore_tests=False):
+    def __init__(self, db_path=None, embedding_model=None, embedding_dim=None, ignore_tests=False, 
+                 llm_provider=None, llm_model=None):
         """Initialize the code indexer with database connection and tools
         
         Args:
@@ -33,12 +42,16 @@ class CodeIndexer:
             embedding_model: Name of the model to use for embeddings (default from settings)
             embedding_dim: Dimension of the embeddings (default from settings)
             ignore_tests: Whether to ignore test files and directories
+            llm_provider: LLM provider for generating comments (default from settings)
+            llm_model: LLM model for generating comments (default from settings)
         """
-        # 使用传入参数或setting中的配置
+        # Use provided parameters or defaults from settings
         self.db_path = db_path or DATABASE_URI or 'mysql+pymysql://root@localhost:4000/code_index'
         self.embedding_model = embedding_model or EMBEDDING_MODEL["name"]
         self.embedding_dim = embedding_dim or EMBEDDING_MODEL["dimension"]
         self.ignore_tests = ignore_tests
+        self.llm_provider = llm_provider or FILEINDER_LLM_PROVIDER
+        self.llm_model = llm_model or FILEINDER_LLM_MODEL
         
         self.engine = get_engine(self.db_path)
         init_db(self.engine)
@@ -47,14 +60,44 @@ class CodeIndexer:
         self.embedder = CodeEmbedder(model_name=self.embedding_model, dim=self.embedding_dim)
         self.using_tidb = 'tidb' in self.db_path.lower() or 'mysql' in self.db_path.lower()
         
-    def index_directory(self, directory_path, generate_embeddings=True, repo_name=None):
+        # Initialize LLM for code comment generation
+        self.llm = None
+        print(f"LLM settings: FILEINDER_GENERATE_COMMENTS={FILEINDER_GENERATE_COMMENTS}, provider={self.llm_provider}, model={self.llm_model}")
+        if FILEINDER_GENERATE_COMMENTS and self.llm_provider and self.llm_model:
+            try:
+                logger.info(f"Initializing LLM with provider: {self.llm_provider}, model: {self.llm_model}")
+                print(f"Attempting to initialize LLM with provider: {self.llm_provider}, model: {self.llm_model}")
+                self.llm = LLMInterface(provider=self.llm_provider, model=self.llm_model)
+                print(f"LLM initialized successfully: {self.llm is not None}")
+            except Exception as e:
+                logger.error(f"Failed to initialize LLM: {e}")
+                print(f"Failed to initialize LLM: {e}")
+                self.llm = None
+        else:
+            print(f"Skipping LLM initialization. Generate comments: {FILEINDER_GENERATE_COMMENTS}, Provider: {self.llm_provider}, Model: {self.llm_model}")
+        
+    def index_directory(self, directory_path, generate_embeddings=True, generate_comments=True, repo_name=None, llm_provider=None, llm_model=None):
         """Index all code files in the specified directory
         
         Args:
             directory_path: Path to the directory to index
             generate_embeddings: Whether to generate embeddings
+            generate_comments: Whether to generate LLM comments
             repo_name: Repository name (if not provided, will be extracted from the directory name)
+            llm_provider: Override LLM provider
+            llm_model: Override LLM model
         """
+        # Re-initialize LLM if provider or model is specified and different from current
+        if (llm_provider and llm_provider != self.llm_provider) or (llm_model and llm_model != self.llm_model):
+            try:
+                logger.info(f"Re-initializing LLM with provider: {llm_provider or self.llm_provider}, model: {llm_model or self.llm_model}")
+                self.llm_provider = llm_provider or self.llm_provider
+                self.llm_model = llm_model or self.llm_model
+                self.llm = LLMInterface(provider=self.llm_provider, model=self.llm_model)
+            except Exception as e:
+                logger.error(f"Failed to re-initialize LLM: {e}")
+                self.llm = None
+        
         directory_path = Path(directory_path).resolve()
         print(f"Indexing files in {directory_path}...")
         
@@ -72,7 +115,12 @@ class CodeIndexer:
         skipped_count = 0
         for file_path in tqdm(files, desc="Indexing files"):
             try:
-                self.index_file(file_path, generate_embeddings, repo_name)
+                self.index_file(
+                    file_path, 
+                    generate_embeddings=generate_embeddings,
+                    generate_comments=generate_comments and self.llm is not None,
+                    repo_name=repo_name
+                )
                 success_count += 1
             except Exception as e:
                 logger.error(f"Error indexing file {file_path}: {e}")
@@ -137,12 +185,13 @@ class CodeIndexer:
         # Fallback: just use the directory name
         return Path(file_path).parent.name
     
-    def index_file(self, file_path, generate_embeddings=True, repo_name=None):
-        """Index a single file, optionally generating embeddings
+    def index_file(self, file_path, generate_embeddings=True, generate_comments=True, repo_name=None):
+        """Index a single file, optionally generating embeddings and comments
         
         Args:
             file_path: Path to the file to index
             generate_embeddings: Whether to generate embeddings
+            generate_comments: Whether to generate LLM comments
             repo_name: Repository name (will be extracted from path if not provided)
         """
         file_path_str = str(file_path)
@@ -171,13 +220,41 @@ class CodeIndexer:
         content_chunks = split_content_into_chunks(content)
         chunks_count = len(content_chunks)
         
-        # Generate embeddings if requested
-        embedding = None
+        # Generate comments if requested and llm is available
+        llm_comments = None
+        comments_embedding = None
+        if generate_comments and self.llm:
+            try:
+                print(f"Generating comments for {file_path} using {self.llm_provider}/{self.llm_model}")
+                llm_comments = self.generate_code_comments(content, language)
+                print(f"Generated comments: {llm_comments is not None}")
+                # Generate embeddings for comments if comments were generated
+                if llm_comments and generate_embeddings:
+                    print(f"Generating embedding for comments")
+                    comments_embedding = self.embedder.generate_embedding(llm_comments)
+                    print(f"Generated comments embedding: {comments_embedding is not None}")
+            except Exception as e:
+                logger.error(f"Error generating comments for {file_path}: {e}")
+                print(f"Error generating comments: {e}")
+        else:
+            if not generate_comments:
+                print(f"Comments generation is disabled")
+            if not self.llm:
+                print(f"LLM is not initialized: provider={self.llm_provider}, model={self.llm_model}")
+        
+        # Generate embeddings for content if requested
+        content_embedding = None
         if generate_embeddings and content:
             try:
-                embedding = self.embedder.generate_embedding(content)
+                print(f"Generating embedding for file content")
+                content_embedding = self.embedder.generate_embedding(content)
+                print(f"Generated content embedding: {content_embedding is not None}")
             except Exception as e:
                 logger.error(f"Error generating embedding for {file_path}: {e}")
+                print(f"Error generating embedding: {e}")
+        else:
+            if not generate_embeddings:
+                print(f"Embeddings generation is disabled")
         
         try:
             if existing:
@@ -187,8 +264,14 @@ class CodeIndexer:
                 existing.language = language
                 existing.repo_name = repo_name
                 
-                if embedding is not None:
-                    existing.file_embedding = embedding
+                if content_embedding is not None:
+                    existing.file_embedding = content_embedding
+                
+                if llm_comments is not None:
+                    existing.llm_comments = llm_comments
+                    
+                if comments_embedding is not None:
+                    existing.comments_embedding = comments_embedding
                 
                 # Delete old file chunks
                 self.session.query(FileChunk).filter_by(file_id=existing.id).delete()
@@ -212,7 +295,9 @@ class CodeIndexer:
                     file_size=file_size,
                     chunks_count=chunks_count,
                     language=language,
-                    file_embedding=embedding
+                    file_embedding=content_embedding,
+                    llm_comments=llm_comments,
+                    comments_embedding=comments_embedding
                 )
                 self.session.add(new_file)
                 self.session.flush()  # Get new file ID
@@ -692,3 +777,36 @@ class CodeIndexer:
             logger.error(traceback.format_exc())
             print(f"[ERROR] Exception in TiDB full-text search: {e}")
             return []
+
+    def generate_code_comments(self, code_content, language=None):
+        """Generate comments describing the code using LLM
+        
+        Args:
+            code_content: The source code to describe
+            language: Programming language of the code
+            
+        Returns:
+            A string containing the LLM-generated comments
+        """
+        if not self.llm:
+            logger.warning("LLM not initialized, cannot generate comments")
+            return None
+            
+        # Limit content size to avoid token limits
+        if len(code_content) > FILEINDER_COMMENTS_MAX_LENGTH:
+            logger.warning(f"Code content too large ({len(code_content)} chars), truncating for comment generation")
+            code_content = code_content[:FILEINDER_COMMENTS_MAX_LENGTH] + "\n\n[CONTENT TRUNCATED]"
+            
+        language_info = f"(language: {language})" if language else ""
+        
+        try:
+            # Use system prompt from settings
+            system_prompt = FILEINDER_COMMENTS_SYSTEM_PROMPT
+            
+            prompt = f"Here is some source code {language_info}. Please describe what it does:\n\n```\n{code_content}\n```"
+            
+            comments = self.llm.generate(prompt=prompt, system_prompt=system_prompt)
+            return comments
+        except Exception as e:
+            logger.error(f"Error generating code comments: {e}")
+            return None

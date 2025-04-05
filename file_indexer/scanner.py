@@ -39,7 +39,7 @@ class CodeScanner:
         
         # Test directories and patterns
         self.test_dirs = ['test', 'tests', 'testing', 'pytest', 'unittest', '__tests__', 'spec']
-        self.test_patterns = ['test_*.py', '*_test.py', '*_test.js', '*_spec.js', '*Test.java', '*Tests.java', '*_spec.rb']
+        self.test_patterns = ['test_*.py', '*_test.py', '*_test.js', '*_spec.js', '*Test.java', '*Tests.java', '*_spec.rb', '*_test.go']
     
     def should_ignore(self, path):
         """Check if a path should be ignored"""

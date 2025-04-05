@@ -7,6 +7,7 @@ from llm.providers import (
     OllamaProvider,
     OpenAILikeProvider,
     BedrockProvider,
+    DeepSeekProvider,
 )
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,8 @@ class LLMInterface:
             return OllamaProvider(model, **kwargs)
         elif provider == "bedrock":
             return BedrockProvider(model, **kwargs)
+        elif provider == "deepseek":
+            return DeepSeekProvider(model, **kwargs)
         else:
             raise ValueError(f"Unsupported LLM provider: {provider}")
 
