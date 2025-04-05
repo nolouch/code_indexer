@@ -399,7 +399,6 @@ class CodeIndexer:
                             FROM INFORMATION_SCHEMA.STATISTICS 
                             WHERE TABLE_NAME = 'file_chunks' 
                             AND INDEX_NAME = 'idx_content_fulltext'
-                            AND INDEX_TYPE = 'FULLTEXT'
                         """)).scalar()
                         
                         # Only use FULLTEXT search if the index exists
