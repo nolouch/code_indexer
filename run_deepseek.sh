@@ -20,8 +20,9 @@ python -m file_indexer.main index "$CODE_DIRECTORY"
 
 # Display completion message
 echo ""
-echo "Indexing complete! You can now search code using the following command:"
+echo "Indexing complete! You can now search code using the following commands:"
 echo "python -m file_indexer.main search \"your search query\" --use-comments"
+echo "python -m file_indexer.main search \"your search query\" --search-type combined --use-comments"
 echo ""
 echo "If you only want to generate comments for already indexed files, use:"
 echo "python -m file_indexer.main comments" 

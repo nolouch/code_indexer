@@ -62,8 +62,10 @@ def main():
                             help='Maximum number of chunks to show (default: all chunks)')
     search_parser.add_argument('--repository', type=str, default=None,
                             help='Repository name to filter results')
-    search_parser.add_argument('--search-type', type=str, choices=['vector', 'full_text'], default='vector',
+    search_parser.add_argument('--search-type', type=str, choices=['vector', 'full_text', 'combined'], default='vector',
                             help='Type of search to perform (default: vector)')
+    search_parser.add_argument('--use-comments', action='store_true',
+                              help='Include LLM-generated comments in the results')
     
     # Get entire file command
     get_parser = subparsers.add_parser('get', help='Get the complete content of a file')
@@ -115,6 +117,9 @@ def main():
         
         # Display search type and repository info if filter was applied
         search_type_display = "Vector Search" if args.search_type == 'vector' else "Full Text Search"
+        if args.search_type == 'combined':
+            search_type_display = "Combined Search (Code + Comments)"
+            
         print(f"Search type: {search_type_display}")
         if args.repository:
             print(f"Searching in repository: {args.repository}")
@@ -125,6 +130,11 @@ def main():
             repo_info = f"[Repo: {file.repo_name}]" if hasattr(file, 'repo_name') and file.repo_name else ""
             
             print(f"{i}. {file.file_path} {language_info} {repo_info} (similarity: {similarity:.4f}) [ID: {file.id}]")
+            
+            # Print LLM-generated comments if requested and available
+            if args.use_comments and hasattr(file, 'llm_comments') and file.llm_comments:
+                print(f"   Comments: {file.llm_comments}")
+                print()
             
             # Print file content preview if requested
             if not args.no_content:

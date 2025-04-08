@@ -336,7 +336,7 @@ class CodeIndexer:
             limit: Maximum number of results to return
             show_content: Whether to include file content in results
             repository: Optional repository name to filter results
-            search_type: Type of search to perform ("vector" or "full_text")
+            search_type: Type of search to perform ("vector", "full_text", or "combined")
             max_lines: Maximum number of lines to show per file (default: 600)
         """
         if not query_text:
@@ -361,13 +361,22 @@ class CodeIndexer:
             
             # Check if database supports vector search
             if self.using_tidb:
-                return self._tidb_vector_search(
-                    query_embedding, 
-                    limit=limit,
-                    show_content=show_content,
-                    repository=repository,
-                    max_lines=max_lines
-                )
+                if search_type == "combined":
+                    return self._tidb_combined_search(
+                        query_embedding, 
+                        limit=limit,
+                        show_content=show_content,
+                        repository=repository,
+                        max_lines=max_lines
+                    )
+                else:
+                    return self._tidb_vector_search(
+                        query_embedding, 
+                        limit=limit,
+                        show_content=show_content,
+                        repository=repository,
+                        max_lines=max_lines
+                    )
             else:
                 raise ValueError("Vector search requires TiDB. Current database does not support vector operations.")
                 
@@ -496,6 +505,150 @@ class CodeIndexer:
                 
                 similarity = 1.0 - float(row.score)  # Convert distance to similarity
                 results.append((file, similarity, file_content))
+                
+        return results
+    
+    def _tidb_combined_search(self, query_embedding, limit=10, show_content=True, repository=None, max_lines=600):
+        """Use TiDB's native vector search capability with combined file and comments embeddings
+        
+        This method searches both code and comments embeddings and combines the results
+        with a weighted score.
+        
+        Args:
+            query_embedding: The embedding vector for the query
+            limit: Maximum number of results to return
+            show_content: Whether to include file content in results
+            repository: Optional repository name to filter results
+            max_lines: Maximum number of lines to show per file
+        """
+        # Convert embedding to TiDB vector format
+        query_vector = self.embedder.embedding_to_tidb_vector(query_embedding)
+        
+        # Build SQL query with vector search for both file and comments embeddings
+        base_sql = """
+            SELECT 
+                f.id, 
+                f.file_path, 
+                f.language,
+                f.repo_name,
+                f.chunks_count,
+                VEC_COSINE_DISTANCE(f.file_embedding, :query_vector) as file_score,
+                CASE WHEN f.comments_embedding IS NOT NULL 
+                     THEN VEC_COSINE_DISTANCE(f.comments_embedding, :query_vector) 
+                     ELSE 1.0 END as comment_score
+            FROM code_files f
+            WHERE f.file_embedding IS NOT NULL
+        """
+        
+        # Add repository filter if provided
+        if repository:
+            base_sql += " AND f.repo_name = :repo_name"
+        
+        # Calculate a combined score with weights (0.7 for code, 0.3 for comments)
+        # Lower score = better match
+        combined_score_clause = """
+            (0.7 * VEC_COSINE_DISTANCE(f.file_embedding, :query_vector) + 
+             0.3 * CASE WHEN f.comments_embedding IS NOT NULL 
+                        THEN VEC_COSINE_DISTANCE(f.comments_embedding, :query_vector) 
+                        ELSE 1.0 END)
+        """
+        
+        # Complete the query with combined score ordering
+        sql_query = text(base_sql + f" ORDER BY {combined_score_clause} LIMIT :limit")
+        
+        # Prepare parameters
+        params = {"query_vector": query_vector, "limit": limit}
+        if repository:
+            params["repo_name"] = repository
+        
+        # Execute query
+        results = []
+        with self.engine.connect() as conn:
+            for row in conn.execute(sql_query, params):
+                file = CodeFile(
+                    id=row.id,
+                    file_path=row.file_path,
+                    language=row.language,
+                    repo_name=row.repo_name,
+                    chunks_count=row.chunks_count
+                )
+                
+                file_content = ""
+                
+                if show_content:
+                    # Get the average number of lines per chunk in this file
+                    avg_lines_per_chunk = 100  # Default fallback value
+                    if hasattr(row, 'line_count') and row.line_count is not None and row.chunks_count > 0:
+                        avg_lines_per_chunk = row.line_count / row.chunks_count
+                    
+                    # Calculate how many chunks we need to fetch to get approximately max_lines
+                    chunks_needed = int(max_lines / avg_lines_per_chunk) + 1 if avg_lines_per_chunk > 0 else 5
+                    
+                    # Limit the chunks to fetch
+                    chunks_to_fetch = min(chunks_needed, row.chunks_count)
+                    
+                    # Construct chunks query with limit if needed
+                    chunks_query = text("""
+                        SELECT content, line_range, start_line, end_line FROM file_chunks 
+                        WHERE file_id = :file_id
+                        ORDER BY chunk_index
+                        LIMIT :chunk_limit
+                    """)
+                    
+                    # Get chunks content for this file
+                    start_chunk_line = None
+                    end_chunk_line = None
+                    
+                    for chunk_row in conn.execute(chunks_query, {
+                        "file_id": row.id, 
+                        "chunk_limit": chunks_to_fetch
+                    }):
+                        file_content += chunk_row.content
+                        
+                        # Try to extract line range information if available
+                        if hasattr(chunk_row, 'start_line') and chunk_row.start_line:
+                            if start_chunk_line is None or chunk_row.start_line < start_chunk_line:
+                                start_chunk_line = chunk_row.start_line
+                                
+                        if hasattr(chunk_row, 'end_line') and chunk_row.end_line:
+                            if end_chunk_line is None or chunk_row.end_line > end_chunk_line:
+                                end_chunk_line = chunk_row.end_line
+                    
+                    # Add line range info to the file object if it was found in chunks
+                    if start_chunk_line is not None:
+                        file.start_line = start_chunk_line
+                    if end_chunk_line is not None:
+                        file.end_line = end_chunk_line
+                        
+                    # Add indication if content is truncated
+                    # If more lines than requested, add a note
+                    if end_chunk_line - start_chunk_line + 1 > max_lines:
+                        file_content += f"\n\n[Content truncated: showing approximately {max_lines} lines. File has {row.line_count or 'unknown'} total lines]"
+                    # If chunks were limited, add a note
+                    elif chunks_to_fetch < row.chunks_count:
+                        total_lines = row.line_count or 'unknown'
+                        file_content += f"\n\n[Content truncated: showing {chunks_to_fetch} of {row.chunks_count} chunks, approximately {end_chunk_line - start_chunk_line + 1} lines out of {total_lines} total]"
+                
+                # Try to fetch LLM comments if they exist
+                try:
+                    llm_comments_query = text("""
+                        SELECT llm_comments FROM code_files 
+                        WHERE id = :file_id AND llm_comments IS NOT NULL
+                    """)
+                    
+                    llm_comments_result = conn.execute(llm_comments_query, {"file_id": row.id}).first()
+                    if llm_comments_result and llm_comments_result.llm_comments:
+                        file.llm_comments = llm_comments_result.llm_comments
+                except Exception as e:
+                    logger.error(f"Error fetching LLM comments for file {row.id}: {e}")
+                
+                # Calculate combined similarity score
+                file_score = float(row.file_score)
+                comment_score = float(row.comment_score)
+                
+                # Calculate final similarity (inverse of distance, higher is better)
+                combined_score = 0.7 * (1.0 - file_score) + 0.3 * (1.0 - comment_score)
+                results.append((file, combined_score, file_content))
                 
         return results
     

@@ -881,21 +881,23 @@ async def search_file_indexer(
     limit: Optional[int] = Query(default=10, description="Maximum number of results to return"),
     show_content: Optional[bool] = Query(default=True, description="Whether to include file content in results"),
     repository: Optional[str] = Query(default=None, description="Repository name to filter results"),
-    search_type: Optional[str] = Query(default="vector", description="Type of search to perform", enum=["vector", "full_text"]),
+    search_type: Optional[str] = Query(default="vector", description="Type of search to perform", enum=["vector", "full_text", "combined"]),
     show_comments: Optional[bool] = Query(default=True, description="Whether to include LLM-generated comments in results"),
     max_lines: Optional[int] = Query(default=600, description="Maximum number of lines to show per file"),
 ):
     """
     [DEPRECATED] Search for files similar to the query text.
     
-    This endpoint is deprecated. Please use /file_indexer/vector_search or /file_indexer/full_text_search instead.
+    This endpoint is deprecated. Please use /file_indexer/vector_search, /file_indexer/combined_search,
+    or /file_indexer/full_text_search instead.
     
     Args:
         query: The search query string
         limit: Maximum number of results to return (default: 10)
         show_content: Whether to include file content in results (default: True)
         repository: Repository name to filter results (optional)
-        search_type: Type of search to perform - "vector" (semantic) or "full_text" (default: "vector")
+        search_type: Type of search to perform - "vector" (semantic), "combined" (code+comments), 
+                    or "full_text" (default: "vector")
         show_comments: Whether to include LLM-generated comments in results (default: True)
         max_lines: Maximum number of lines to show per file (default: 600)
         
@@ -1329,6 +1331,117 @@ async def get_file_by_path(
         )
 
 
+@app.post("/file_indexer/combined_search", response_model=FileIndexerResponse, tags=["File Indexer"])
+async def combined_search_files(request: FileSearchRequest):
+    """
+    Search for files using both code content and comments embeddings.
+    
+    This endpoint performs a weighted search that considers both file content and LLM-generated 
+    comments, combining the results for better semantic matching. This is useful when you want 
+    to find code based on functionality described in natural language.
+    
+    Args:
+        query: The search query string
+        limit: Maximum number of results to return (default: 10)
+        show_content: Whether to include file content in results (default: True)
+        repository: Repository name to filter results (optional)
+        show_comments: Whether to include LLM-generated comments in results (default: True)
+        max_lines: Maximum number of lines to show per file (default: 600)
+        
+    Returns:
+        A list of files matching the query, with optional content.
+    """
+    if not file_indexer:
+        raise HTTPException(
+            status_code=503, detail="File indexer not initialized"
+        )
+    
+    try:
+        search_results = file_indexer.search_similar(
+            query_text=request.query,
+            limit=request.limit,
+            show_content=request.show_content,
+            repository=request.repository,
+            search_type="combined",
+            max_lines=request.max_lines
+        )
+        
+        # Convert to response format
+        results = []
+        for file, similarity, content in search_results:
+            # Extract line range information from chunks if available
+            start_line = None
+            end_line = None
+            line_range = None
+            
+            # Get LLM comments if requested and available
+            llm_comments = None
+            if request.show_comments and hasattr(file, 'llm_comments') and file.llm_comments:
+                llm_comments = file.llm_comments
+            
+            # If content has chunks, try to extract line range info
+            if content and "LINES:" in content:
+                try:
+                    # Find line range markers in the content
+                    lines_markers = [l for l in content.split('\n') if l.startswith("LINES:")]
+                    if lines_markers:
+                        # Get the first and last line markers
+                        first_marker = lines_markers[0]
+                        last_marker = lines_markers[-1]
+                        
+                        # Extract line numbers
+                        first_range = first_marker.split("LINES:")[1].strip()
+                        last_range = last_marker.split("LINES:")[1].strip()
+                        
+                        first_start, _ = first_range.split('-')
+                        _, last_end = last_range.split('-')
+                        
+                        start_line = int(first_start)
+                        end_line = int(last_end)
+                        line_range = f"{start_line}-{end_line}"
+                except Exception as e:
+                    print(f"[API-WARNING] Error extracting line range from content: {e}")
+            
+            # Use database fields for line information if available
+            if hasattr(file, 'start_line') and file.start_line:
+                start_line = file.start_line
+            if hasattr(file, 'end_line') and file.end_line:
+                end_line = file.end_line
+            if start_line and end_line:
+                line_range = f"{start_line}-{end_line}"
+            
+            results.append(
+                FileIndexerResult(
+                    id=file.id,
+                    file_path=file.file_path,
+                    language=file.language or "unknown",
+                    repo_name=file.repo_name,
+                    similarity=similarity,
+                    content=content if request.show_content else None,
+                    start_line=start_line,
+                    end_line=end_line,
+                    line_range=line_range,
+                    llm_comments=llm_comments
+                )
+            )
+        
+        return FileIndexerResponse(results=results)
+    except ValueError as e:
+        # Catch the specific error when TiDB is required for vector search
+        if "requires TiDB" in str(e):
+            raise HTTPException(
+                status_code=400, 
+                detail="Combined search requires TiDB. Current database does not support vector operations. Try using full_text_search endpoint instead."
+            )
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error processing combined search query '{request.query}': {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500, detail=f"Error searching files: {str(e)}"
+        )
+
+
 # API usage examples
 """
 # Curl examples for the API endpoints
@@ -1371,6 +1484,18 @@ curl -X POST "http://localhost:8000/file_indexer/vector_search" \
   -H "Content-Type: application/json" \
   -d '{
     "query": "implement transaction",
+    "limit": 10,
+    "show_content": true,
+    "repository": "tidb",
+    "show_comments": true,
+    "max_lines": 600
+  }'
+
+# Combined vector search (code + comments)
+curl -X POST "http://localhost:8000/file_indexer/combined_search" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "database connection pool implementation",
     "limit": 10,
     "show_content": true,
     "repository": "tidb",
