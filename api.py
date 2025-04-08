@@ -768,6 +768,71 @@ async def vector_search_files(request: FileSearchRequest):
         )
 
 
+@app.post("/file_indexer/comments_search", response_model=FileIndexerResponse, tags=["File Indexer"])
+async def comments_search_files(request: FileSearchRequest):
+    """
+    Search files using only the comment embeddings.
+    This is similar to vector_search but focuses only on the LLM-generated comments,
+    which can provide a more semantic search experience focused on the meaning of the code
+    rather than the code structure itself.
+    """
+    # Initialize the Code Indexer
+    indexer = CodeIndexer()
+    
+    print(f"[API] Performing comments embedding search for: {request.query}")
+    print(f"[API] Search parameters: limit={request.limit}, show_content={request.show_content}, repository={request.repository}, max_lines={request.max_lines}")
+    
+    try:
+        # Perform the search using the comments embedding
+        results = indexer.search_similar(
+            request.query, 
+            limit=request.limit,
+            show_content=request.show_content,
+            repository=request.repository,
+            search_type="comments",
+            max_lines=request.max_lines
+        )
+        
+        # Process results
+        file_results = []
+        for file, similarity, content in results:
+            # Skip files with no comments if we're searching comments only
+            if not hasattr(file, 'llm_comments') or not file.llm_comments:
+                continue
+                
+            file_result = FileIndexerResult(
+                id=file.id,
+                file_path=file.file_path,
+                language=file.language,
+                repo_name=file.repo_name,
+                similarity=similarity,
+                content=content if request.show_content else None,
+                llm_comments=file.llm_comments if request.show_comments else None
+            )
+            
+            # Add line range information if available
+            if hasattr(file, 'start_line') and file.start_line:
+                file_result.start_line = file.start_line
+            if hasattr(file, 'end_line') and file.end_line:
+                file_result.end_line = file.end_line
+            if hasattr(file, 'start_line') and hasattr(file, 'end_line') and file.start_line and file.end_line:
+                file_result.line_range = f"{file.start_line}-{file.end_line}"
+                
+            file_results.append(file_result)
+        
+        indexer.close()
+        
+        # Log summary
+        print(f"[API] Comments search found {len(file_results)} results for query: {request.query}")
+        return FileIndexerResponse(results=file_results)
+    except Exception as e:
+        indexer.close()
+        traceback_str = traceback.format_exc()
+        print(f"[API-ERROR] Comments search failed: {e}")
+        print(traceback_str)
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+
 @app.post("/file_indexer/full_text_search", response_model=FileIndexerResponse, tags=["File Indexer"])
 async def full_text_search_files(request: FileSearchRequest):
     """
@@ -881,7 +946,7 @@ async def search_file_indexer(
     limit: Optional[int] = Query(default=10, description="Maximum number of results to return"),
     show_content: Optional[bool] = Query(default=True, description="Whether to include file content in results"),
     repository: Optional[str] = Query(default=None, description="Repository name to filter results"),
-    search_type: Optional[str] = Query(default="vector", description="Type of search to perform", enum=["vector", "full_text", "combined"]),
+    search_type: Optional[str] = Query(default="vector", description="Type of search to perform", enum=["vector", "full_text", "combined", "comments"]),
     show_comments: Optional[bool] = Query(default=True, description="Whether to include LLM-generated comments in results"),
     max_lines: Optional[int] = Query(default=600, description="Maximum number of lines to show per file"),
 ):
@@ -1334,112 +1399,115 @@ async def get_file_by_path(
 @app.post("/file_indexer/combined_search", response_model=FileIndexerResponse, tags=["File Indexer"])
 async def combined_search_files(request: FileSearchRequest):
     """
-    Search for files using both code content and comments embeddings.
-    
-    This endpoint performs a weighted search that considers both file content and LLM-generated 
-    comments, combining the results for better semantic matching. This is useful when you want 
-    to find code based on functionality described in natural language.
-    
-    Args:
-        query: The search query string
-        limit: Maximum number of results to return (default: 10)
-        show_content: Whether to include file content in results (default: True)
-        repository: Repository name to filter results (optional)
-        show_comments: Whether to include LLM-generated comments in results (default: True)
-        max_lines: Maximum number of lines to show per file (default: 600)
-        
-    Returns:
-        A list of files matching the query, with optional content.
+    Performs a combined search using both code and comments embeddings.
+    This provides the most comprehensive search results by looking at both
+    the actual code structure and the semantic meaning expressed in the comments.
     """
-    if not file_indexer:
-        raise HTTPException(
-            status_code=503, detail="File indexer not initialized"
-        )
+    # Initialize the Code Indexer
+    indexer = CodeIndexer()
+    
+    print(f"[API] Performing combined search for: {request.query}")
+    print(f"[API] Search parameters: limit={request.limit}, show_content={request.show_content}, repository={request.repository}, max_lines={request.max_lines}")
     
     try:
-        search_results = file_indexer.search_similar(
-            query_text=request.query,
-            limit=request.limit,
+        # Perform the search
+        file_results = []
+        
+        # Start with vector search
+        results = indexer.search_similar(
+            request.query, 
+            limit=request.limit * 2,  # Get more results for merging
             show_content=request.show_content,
             repository=request.repository,
-            search_type="combined",
+            search_type="combined",  # Use the combined search
             max_lines=request.max_lines
         )
         
-        # Convert to response format
-        results = []
-        for file, similarity, content in search_results:
-            # Extract line range information from chunks if available
-            start_line = None
-            end_line = None
-            line_range = None
+        # Process results into response format
+        seen_file_ids = set()
+        
+        # Process vector results first (usually higher quality)
+        for file, similarity, content in results:
+            if file.id in seen_file_ids:
+                continue
+                
+            seen_file_ids.add(file.id)
             
-            # Get LLM comments if requested and available
-            llm_comments = None
-            if request.show_comments and hasattr(file, 'llm_comments') and file.llm_comments:
-                llm_comments = file.llm_comments
+            file_result = FileIndexerResult(
+                id=file.id,
+                file_path=file.file_path,
+                language=file.language,
+                repo_name=file.repo_name,
+                similarity=similarity,
+                content=content if request.show_content else None,
+                llm_comments=file.llm_comments if request.show_comments else None
+            )
             
-            # If content has chunks, try to extract line range info
-            if content and "LINES:" in content:
-                try:
-                    # Find line range markers in the content
-                    lines_markers = [l for l in content.split('\n') if l.startswith("LINES:")]
-                    if lines_markers:
-                        # Get the first and last line markers
-                        first_marker = lines_markers[0]
-                        last_marker = lines_markers[-1]
-                        
-                        # Extract line numbers
-                        first_range = first_marker.split("LINES:")[1].strip()
-                        last_range = last_marker.split("LINES:")[1].strip()
-                        
-                        first_start, _ = first_range.split('-')
-                        _, last_end = last_range.split('-')
-                        
-                        start_line = int(first_start)
-                        end_line = int(last_end)
-                        line_range = f"{start_line}-{end_line}"
-                except Exception as e:
-                    print(f"[API-WARNING] Error extracting line range from content: {e}")
-            
-            # Use database fields for line information if available
+            # Add line range information if available
             if hasattr(file, 'start_line') and file.start_line:
-                start_line = file.start_line
+                file_result.start_line = file.start_line
             if hasattr(file, 'end_line') and file.end_line:
-                end_line = file.end_line
-            if start_line and end_line:
-                line_range = f"{start_line}-{end_line}"
+                file_result.end_line = file.end_line
+            if hasattr(file, 'start_line') and hasattr(file, 'end_line') and file.start_line and file.end_line:
+                file_result.line_range = f"{file.start_line}-{file.end_line}"
+                
+            file_results.append(file_result)
+        
+        # If we don't have enough results, try full-text search as a fallback
+        if len(file_results) < request.limit:
+            fallback_limit = request.limit - len(file_results)
+            fallback_results = indexer.search_full_text(
+                request.query, 
+                limit=fallback_limit,
+                show_content=request.show_content,
+                repository=request.repository,
+                max_lines=request.max_lines
+            )
             
-            results.append(
-                FileIndexerResult(
+            # Process fulltext results, avoiding duplicates
+            for file, similarity, content in fallback_results:
+                if file.id in seen_file_ids or len(file_results) >= request.limit:
+                    continue
+                    
+                seen_file_ids.add(file.id)
+                
+                file_result = FileIndexerResult(
                     id=file.id,
                     file_path=file.file_path,
-                    language=file.language or "unknown",
+                    language=file.language,
                     repo_name=file.repo_name,
-                    similarity=similarity,
+                    similarity=similarity * 0.8,  # Lower confidence for fulltext results
                     content=content if request.show_content else None,
-                    start_line=start_line,
-                    end_line=end_line,
-                    line_range=line_range,
-                    llm_comments=llm_comments
+                    llm_comments=file.llm_comments if request.show_comments else None
                 )
-            )
+                
+                # Add line range information if available
+                if hasattr(file, 'start_line') and file.start_line:
+                    file_result.start_line = file.start_line
+                if hasattr(file, 'end_line') and file.end_line:
+                    file_result.end_line = file.end_line
+                if hasattr(file, 'start_line') and hasattr(file, 'end_line') and file.start_line and file.end_line:
+                    file_result.line_range = f"{file.start_line}-{file.end_line}"
+                    
+                file_results.append(file_result)
         
-        return FileIndexerResponse(results=results)
-    except ValueError as e:
-        # Catch the specific error when TiDB is required for vector search
-        if "requires TiDB" in str(e):
-            raise HTTPException(
-                status_code=400, 
-                detail="Combined search requires TiDB. Current database does not support vector operations. Try using full_text_search endpoint instead."
-            )
-        raise HTTPException(status_code=400, detail=str(e))
+        # Sort by similarity score for consistent presentation
+        file_results.sort(key=lambda x: x.similarity, reverse=True)
+        
+        # Limit to requested number of results
+        file_results = file_results[:request.limit]
+        
+        indexer.close()
+        
+        # Log summary
+        print(f"[API] Combined search found {len(file_results)} results for query: {request.query}")
+        return FileIndexerResponse(results=file_results)
     except Exception as e:
-        logger.error(f"Error processing combined search query '{request.query}': {e}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(
-            status_code=500, detail=f"Error searching files: {str(e)}"
-        )
+        indexer.close()
+        traceback_str = traceback.format_exc()
+        print(f"[API-ERROR] Combined search failed: {e}")
+        print(traceback_str)
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
 
 # API usage examples
